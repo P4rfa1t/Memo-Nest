@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import zipfile
@@ -242,6 +243,11 @@ def _remote_url(cfg) -> str:
     return f"https://x-access-token:{token}@github.com/{repo}.git"
 
 
+def _plain_remote(url: str) -> str:
+    """去掉地址里的用户名/Token，只保留可公开的仓库地址。"""
+    return re.sub(r"(?<=//)[^/@]+@", "", url)
+
+
 def _stage_github_source() -> Path:
     """把普通笔记与私密库密文汇总到一个临时目录，避免污染 data/notes。"""
     staging = cfgmod.DATA_DIR / "github"
@@ -301,10 +307,11 @@ def push_to_github(cfg, notes_dir: Path | None = None) -> str:
     )
 
     remotes = _git(["remote"], notes_dir).stdout.split()
+    plain = _plain_remote(url)
     if "origin" in remotes:
-        _git(["remote", "set-url", "origin", url], notes_dir)
+        _git(["remote", "set-url", "origin", plain], notes_dir)
     else:
-        _git(["remote", "add", "origin", url], notes_dir)
+        _git(["remote", "add", "origin", plain], notes_dir)
 
     _git(["add", "-A"], notes_dir)
     staged = _git(["diff", "--cached", "--quiet"], notes_dir, check=False)
@@ -314,12 +321,13 @@ def push_to_github(cfg, notes_dir: Path | None = None) -> str:
         _git(["commit", "-m", f"备忘录自动备份 {stamp}"], notes_dir)
         committed = True
 
-    push = _git(["push", "origin", f"HEAD:{branch}"], notes_dir, check=False)
+    # Token 只在推送时临时拼进地址，不写进 .git/config
+    push = _git(["push", url, f"HEAD:{branch}"], notes_dir, check=False)
     if push.returncode != 0:
         output = f"{push.stderr}\n{push.stdout}"
         if any(word in output.lower() for word in ("rejected", "fetch first", "non-fast-forward")):
             LOG.info("远端有新提交，尝试合并后重试")
-            _git(["fetch", "origin", branch], notes_dir, check=False)
+            _git(["fetch", url, branch], notes_dir, check=False)
             _git(
                 [
                     "merge",
@@ -327,15 +335,15 @@ def push_to_github(cfg, notes_dir: Path | None = None) -> str:
                     "--no-edit",
                     "-X",
                     "ours",
-                    f"origin/{branch}",
+                    "FETCH_HEAD",
                 ],
                 notes_dir,
                 check=False,
             )
-            push = _git(["push", "origin", f"HEAD:{branch}"], notes_dir, check=False)
+            push = _git(["push", url, f"HEAD:{branch}"], notes_dir, check=False)
         if push.returncode != 0:
             detail = (push.stderr or push.stdout or "推送失败").strip().splitlines()[-1]
-            raise BackupError(f"GitHub 推送失败：{detail}")
+            raise BackupError(f"GitHub 推送失败：{_plain_remote(detail)}")
 
     repo = str(cfg.get("github.repo", "") or "GitHub")
     return f"已推送 {repo}（{branch} 分支）" + ("" if committed else "，无新变更")

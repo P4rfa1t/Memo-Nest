@@ -237,8 +237,10 @@ python -m venv .venv
 
 - 推送前会把普通笔记与私密库密文汇总到 `data/github/` 暂存目录，再提交推送，
   不会污染 `data/notes`
-- Token 保存在本地 `config.json` 和暂存仓库的 `.git/config`，不会进入项目仓库
+- Token 只保存在本地 `config.json`，推送时才临时拼进地址，**不会写入 `.git/config`**
 - 首次推送空仓库即可；若远端已有提交，程序会先合并再推送
+- 建议把笔记仓库设为 **私有**：普通便签是明文 Markdown，私密便签虽然是密文，
+  但仓库本身没必要公开
 
 ## 上传本项目到 GitHub
 
