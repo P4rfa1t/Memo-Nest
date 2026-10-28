@@ -284,10 +284,12 @@ def delete_item(cfg, item_id: str) -> None:
 def sync(
     cfg,
     zip_path: Path | None,
-    notes_dir: Path = cfgmod.NOTES_DIR,
-    index_path: Path = cfgmod.INDEX_PATH,
+    notes_dir: Path | None = None,
+    index_path: Path | None = None,
     vault: bool = False,
 ) -> str:
+    notes_dir = cfgmod.NOTES_DIR if notes_dir is None else notes_dir
+    index_path = cfgmod.INDEX_PATH if index_path is None else index_path
     subfolder = str(cfg.get("onedrive.subfolder", "MemoNest备份") or "MemoNest备份")
     subfolder = subfolder.strip("/")
     ensure_folder(cfg, subfolder)

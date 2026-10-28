@@ -53,12 +53,16 @@ class BackupReport:
 # 本地打包
 # --------------------------------------------------------------------------
 def create_backup_zip(
-    notes_dir: Path = cfgmod.NOTES_DIR,
-    index_path: Path = cfgmod.INDEX_PATH,
-    backup_dir: Path = cfgmod.BACKUP_DIR,
+    notes_dir: Path | None = None,
+    index_path: Path | None = None,
+    backup_dir: Path | None = None,
     keep: int = 20,
     vault: bool = False,
 ) -> Path:
+    # 路径在调用时解析，避免测试或冻结模式改写 cfgmod 后仍指向旧目录
+    notes_dir = cfgmod.NOTES_DIR if notes_dir is None else notes_dir
+    index_path = cfgmod.INDEX_PATH if index_path is None else index_path
+    backup_dir = cfgmod.BACKUP_DIR if backup_dir is None else backup_dir
     backup_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     path = backup_dir / f"memo-backup-{stamp}.zip"
