@@ -1,0 +1,26 @@
+{
+  "onedrive": {
+    "enabled": false,
+    "folder": "",
+    "subfolder": "MemoNest备份",
+    "mirror_notes": true,
+    "keep_backups": 30
+  },
+  "github": {
+    "enabled": false,
+    "repo": "your-github-name/memo-notes",
+    "branch": "main",
+    "token": "ghp_xxxxxxxxxxxxxxxxxxxx",
+    "remote_url": "",
+    "author_name": "MemoNest",
+    "author_email": "memonest@localhost"
+  },
+  "general": {
+    "autostart": false,
+    "auto_backup_minutes": 0,
+    "backup_on_exit": true,
+    "keep_backups": 20,
+    "window_geometry": "",
+    "always_on_top": false
+  }
+}
