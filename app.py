@@ -13,7 +13,7 @@ import webbrowser
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from tkinter import filedialog, messagebox
+from tkinter import filedialog
 
 try:
     import customtkinter as ctk
@@ -89,11 +89,11 @@ WELCOME = """\
 
 ## 快速上手
 
-- 顶部下拉框切换便签，按 `+` 新建
-- 内容会自动保存，`Ctrl+S` 也可以手动保存
+- 顶部下拉框切换便签，按 `+` 新建，点 📌 置顶当前便签
+- 内容会自动保存，不需要手动保存
 - 点「预览」查看渲染效果，再点一次回到编辑
-- 「置顶」让窗口停留最前，像真正的便签一样
-- `Ctrl+F` 搜索便签，`Ctrl+D` 删除当前便签
+- 点 🔍 搜索便签，`Esc` 收起；`Ctrl+F` 也能打开
+- `Ctrl+N` 新建，`Ctrl+D` 删除当前便签
 
 ## 支持的 Markdown
 
@@ -178,6 +178,8 @@ class MemoApp(ctk.CTk):
         self._vault_busy = False
         self._vault_entries: list[ctk.CTkEntry] = []
         self._menu_cache: dict[str, MenuOverlay] = {}
+        self._settings_panel = None
+        self._modal_depth = 0
 
         self.font_ui = ctk.CTkFont(family=FONT_FAMILY, size=13)
         self.font_small = ctk.CTkFont(family=FONT_FAMILY, size=12)
@@ -687,14 +689,7 @@ class MemoApp(ctk.CTk):
             except tk.TclError:
                 pass
         self._menu_cache = {}
-        self._topmost_var = tk.BooleanVar(value=bool(self.cfg.get("general.always_on_top")))
         self._menu_items = [
-            ("新建便签", "Ctrl+N", self.new_note),
-            ("保存", "Ctrl+S", lambda: self.save_current(force=True)),
-            ("置顶笔记", "", self.toggle_pin),
-            ("预览 / 编辑", "Ctrl+E", self.toggle_preview),
-            ("搜索便签", "Ctrl+F", self.focus_search),
-            ("立即云备份", "F5", self.start_backup),
             ("设置…", "Ctrl+,", self.open_settings),
             (None, "", None),
             ("导出为 Markdown…", "", self.export_note),
@@ -750,8 +745,10 @@ class MemoApp(ctk.CTk):
         self.editor.bind("<Tab>", self._insert_tab)
         self.editor.bind("<Button-3>", self._show_editor_menu)
 
-    @staticmethod
-    def _shortcut(callback):
+    def _shortcut(self, callback):
+        # 设置页或提示卡片打开时，不让全局快捷键操作背后的便签
+        if self._settings_panel is not None or self._modal_depth:
+            return "break"
         callback()
         return "break"
 
@@ -818,7 +815,6 @@ class MemoApp(ctk.CTk):
         self._header_actions = actions
         self.preview_button = self._strip_button(actions, "预览", self.toggle_preview)
         self._strip_button(actions, "备份", self.start_backup)
-        self.topmost_button = self._strip_button(actions, "置顶", self.toggle_topmost)
         self.menu_button = ctk.CTkButton(
             actions,
             text="⋯",
@@ -856,6 +852,32 @@ class MemoApp(ctk.CTk):
             dropdown_font=self.font_small,
         )
         self.note_combo.grid(row=0, column=0, sticky="ew")
+        self.pin_button = ctk.CTkButton(
+            selector,
+            text="📌",
+            width=30,
+            height=30,
+            corner_radius=10,
+            fg_color="transparent",
+            hover_color="#F1E3A9",
+            text_color=p["muted"],
+            font=ctk.CTkFont(family=FONT_FAMILY, size=14),
+            command=self.toggle_pin,
+        )
+        self.pin_button.grid(row=0, column=1, padx=(8, 0))
+        self.search_button = ctk.CTkButton(
+            selector,
+            text="🔍",
+            width=30,
+            height=30,
+            corner_radius=10,
+            fg_color="transparent",
+            hover_color="#F1E3A9",
+            text_color=p["muted"],
+            font=ctk.CTkFont(family=FONT_FAMILY, size=13),
+            command=self.toggle_search,
+        )
+        self.search_button.grid(row=0, column=2, padx=(6, 0))
         ctk.CTkButton(
             selector,
             text="+",
@@ -867,7 +889,7 @@ class MemoApp(ctk.CTk):
             text_color="#3B3323",
             font=ctk.CTkFont(family=MONO_FAMILY, size=17, weight="bold"),
             command=self.new_note,
-        ).grid(row=0, column=1, padx=(8, 0))
+        ).grid(row=0, column=3, padx=(6, 0))
 
         self.search_row = ctk.CTkFrame(top, fg_color="transparent", corner_radius=0)
         self.search_row.grid(row=2, column=0, sticky="ew", pady=(7, 0))
@@ -1086,20 +1108,10 @@ class MemoApp(ctk.CTk):
             self.geometry(f"{width}x{height}+{x}+70")
         if self.cfg.get("general.always_on_top"):
             self.attributes("-topmost", True)
-            self.topmost_button.configure(text="已置顶", text_color=PALETTE["fg"])
 
     def _apply_topmost(self) -> None:
-        enabled = bool(self._topmost_var.get())
-        self.attributes("-topmost", enabled)
-        self.topmost_button.configure(
-            text="已置顶" if enabled else "置顶",
-            text_color=PALETTE["fg"] if enabled else PALETTE["muted"],
-            fg_color=PALETTE["strip"] if enabled else "transparent",
-        )
-
-    def toggle_topmost(self) -> None:
-        self._topmost_var.set(not bool(self._topmost_var.get()))
-        self._apply_topmost()
+        """窗口置顶由设置页控制，切换后立即生效。"""
+        self.attributes("-topmost", bool(self.cfg.get("general.always_on_top")))
 
     # ------------------------------------------------------------------
     # 笔记切换
@@ -1186,7 +1198,7 @@ class MemoApp(ctk.CTk):
         self.editor.delete("1.0", "end")
         self.editor.edit_modified(False)
         self._dirty = False
-        self.meta_label.configure(text="—")
+        self._update_meta()
         self._update_stats()
         self.note_combo.set("")
         self._loading = False
@@ -1211,10 +1223,9 @@ class MemoApp(ctk.CTk):
         if self.current is None:
             return
         where = "私密库的加密回收站" if self.library == "vault" else "data/trash 中找回"
-        if not messagebox.askyesno(
+        if not self.ask_yes_no(
             "删除便签",
             f"确定删除《{self.current.title}》吗？\n删除后可在 {where} 找回。",
-            parent=self,
         ):
             return
         self.store.delete(self.current.id)
@@ -1231,10 +1242,46 @@ class MemoApp(ctk.CTk):
         self.current.pinned = not self.current.pinned
         self.store.save(self.current)
         self.refresh_list()
-        self.set_status("已置顶笔记" if self.current.pinned else "已取消置顶")
+        self._update_pin_button()
+        self.set_status("已置顶便签" if self.current.pinned else "已取消置顶")
+
+    def _update_pin_button(self) -> None:
+        """别针按钮只在当前便签被置顶时点亮。"""
+        button = getattr(self, "pin_button", None)
+        if button is None:
+            return
+        pinned = bool(self.current is not None and self.current.pinned)
+        try:
+            button.configure(
+                text_color=PALETTE["accent_hover"] if pinned else PALETTE["muted"],
+                fg_color=PALETTE["strip"] if pinned else "transparent",
+                hover_color="#F1E3A9",
+            )
+        except tk.TclError:
+            pass
+
+    def toggle_search(self) -> None:
+        if self.search_row.grid_info():
+            self._hide_search()
+        else:
+            self.focus_search()
+
+    def _update_search_button(self, active: bool) -> None:
+        button = getattr(self, "search_button", None)
+        if button is None:
+            return
+        try:
+            button.configure(
+                text_color=PALETTE["accent_hover"] if active else PALETTE["muted"],
+                fg_color=PALETTE["strip"] if active else "transparent",
+                hover_color="#F1E3A9",
+            )
+        except tk.TclError:
+            pass
 
     def focus_search(self) -> None:
         self.search_row.grid()
+        self._update_search_button(True)
         self.search_entry.focus_set()
         self.search_entry.select_range(0, "end")
 
@@ -1271,6 +1318,7 @@ class MemoApp(ctk.CTk):
                 pass
             self._search_job = None
         self.search_row.grid_remove()
+        self._update_search_button(False)
         self.refresh_list()
         if load is not None:
             self.save_current(refresh=False)
@@ -1389,6 +1437,7 @@ class MemoApp(ctk.CTk):
             self.md_view.render(self.editor.get("1.0", "end-1c"))
 
     def _update_meta(self) -> None:
+        self._update_pin_button()
         if self.current is None:
             self.meta_label.configure(text="—")
             return
@@ -1417,7 +1466,7 @@ class MemoApp(ctk.CTk):
 
     def export_note(self) -> None:
         if self.current is None:
-            messagebox.showinfo("导出", "请先选择一条便签。", parent=self)
+            self.show_info("导出", "请先选择一条便签。")
             return
         self.save_current(refresh=False)
         safe = re.sub(r'[\\/:*?"<>|]+', "_", self.current.title) or "note"
@@ -1466,10 +1515,8 @@ class MemoApp(ctk.CTk):
             self.set_status("备份正在进行中…")
             return
         if not self.cfg.channels_enabled():
-            if not silent and messagebox.askyesno(
-                "云备份", "还没有启用 OneDrive 或 GitHub 备份。\n现在去设置吗？", parent=self
-            ):
-                self.open_settings()
+            # 不弹模态框打断写作，只在状态栏提示
+            self.set_status("尚未启用云备份，可在「设置」中开启 OneDrive 或 GitHub")
             return
         self._backup_running = True
         self.set_status("正在云备份…")
@@ -1489,7 +1536,7 @@ class MemoApp(ctk.CTk):
         if error is not None:
             self.set_status("备份失败")
             if not silent:
-                messagebox.showerror("云备份失败", str(error), parent=self)
+                self.show_error("云备份失败", str(error))
             return
         assert report is not None
         clouds = report.cloud_steps
@@ -1497,8 +1544,10 @@ class MemoApp(ctk.CTk):
             self._last_backup = datetime.now()
         self.set_status("云备份完成" if report.ok else "云备份部分失败")
         if not silent:
-            dialog = messagebox.showinfo if report.ok else messagebox.showwarning
-            dialog("云备份", report.summary(), parent=self)
+            if report.ok:
+                self.show_info("云备份", report.summary())
+            else:
+                self.show_warning("云备份", report.summary())
 
     def _schedule_auto_backup(self) -> None:
         if self._auto_job:
@@ -1533,10 +1582,73 @@ class MemoApp(ctk.CTk):
             LOG.exception("同步开机自启失败")
 
     def open_settings(self) -> None:
-        SettingsDialog(self)
+        if getattr(self, "_settings_panel", None) is not None:
+            return
+        self._settings_panel = SettingsPanel(self)
+
+    def close_settings(self) -> None:
+        panel = getattr(self, "_settings_panel", None)
+        if panel is None:
+            return
+        self._settings_panel = None
+        if getattr(panel, "_esc_bind", None) is not None:
+            try:
+                self.unbind("<Escape>", panel._esc_bind)
+            except tk.TclError:
+                pass
+            panel._esc_bind = None
+        for child in panel.winfo_children():
+            if isinstance(child, DeviceCodePanel):
+                try:
+                    child._close()
+                except tk.TclError:
+                    pass
+        try:
+            panel.destroy()
+        except tk.TclError:
+            pass
+        try:
+            if getattr(panel, "_saved_state", "normal") == "zoomed":
+                self.state("zoomed")
+            elif getattr(panel, "_saved_geometry", ""):
+                self.geometry(panel._saved_geometry)
+        except tk.TclError:
+            pass
 
     def _need_unlock(self) -> None:
-        messagebox.showinfo("私密笔记库", "请先解锁私密笔记库。", parent=self)
+        self.show_info("私密笔记库", "请先解锁私密笔记库。")
+
+    # ------------------------------------------------------------------
+    # 主窗口内的消息 / 确认卡片（不使用系统弹窗）
+    # ------------------------------------------------------------------
+    def _modal_host(self):
+        """消息卡片要盖在当前最上层的面板上，而不是被设置页挡住。"""
+        if self._settings_panel is not None:
+            return self._settings_panel
+        if self._vault_panel is not None:
+            return self._vault_panel
+        return self.body
+
+    def show_info(self, title: str, message: str) -> None:
+        InWindowDialog(self, title, message).show()
+
+    def show_warning(self, title: str, message: str) -> None:
+        InWindowDialog(self, title, message, tone="warning").show()
+
+    def show_error(self, title: str, message: str) -> None:
+        InWindowDialog(self, title, message, tone="error").show()
+
+    def ask_yes_no(
+        self, title: str, message: str, ok_text: str = "确定", cancel_text: str = "取消"
+    ) -> bool:
+        return InWindowDialog(
+            self,
+            title,
+            message,
+            confirm=True,
+            ok_text=ok_text,
+            cancel_text=cancel_text,
+        ).show()
 
     def _open_path(self, path: Path) -> None:
         try:
@@ -1545,7 +1657,7 @@ class MemoApp(ctk.CTk):
                 path.write_text("", encoding="utf-8")
             os.startfile(str(path))
         except OSError as exc:
-            messagebox.showerror("打开失败", str(exc), parent=self)
+            self.show_error("打开失败", str(exc))
 
     def show_help(self) -> None:
         tip = (
@@ -1553,36 +1665,37 @@ class MemoApp(ctk.CTk):
             if self.vault is not None
             else "· 笔记文件位于 data/notes，可直接用其他编辑器编辑\n"
         )
-        messagebox.showinfo(
+        self.show_info(
             "使用说明",
             "MemoNest 便签\n\n"
             "· 顶部下拉框切换便签，「＋」新建\n"
-            "· 标题与正文自动保存，Ctrl+S 手动保存\n"
+            "· 📌 把当前便签置顶（列表最前）\n"
+            "· 🔍 展开搜索，回车打开第一条，Esc 收起\n"
+            "· 标题与正文自动保存，无需手动保存（Ctrl+S 仍可用）\n"
             "· 「预览」查看 Markdown 效果，Ctrl+E 切换\n"
-            "· 「置顶」让便签窗口始终最前\n"
-            "· Ctrl+F 搜索 / Ctrl+D 删除 / F5 云备份\n"
+            "· Ctrl+N 新建 / Ctrl+F 搜索 / Ctrl+D 删除 / F5 云备份\n"
             f"{tip}"
             "· 私密库里的便签加密保存，其余便签仍是 Markdown 明文\n"
             "· OneDrive 备份可用同步文件夹，或直接登录 Microsoft 账号\n"
             "· GitHub 备份需要 Personal Access Token（repo 权限）",
-            parent=self,
         )
 
     def show_about(self) -> None:
-        messagebox.showinfo(
+        self.show_info(
             "关于",
             f"{cfgmod.APP_NAME}  v{cfgmod.APP_VERSION}\n\n"
             "便签式的本地 Markdown 备忘录。\n"
             "CustomTkinter 界面 · OneDrive 云备份 · GitHub 同步\n"
             "可选私密笔记库（主密码 + Windows Hello）\n\n"
             f"数据目录：{cfgmod.DATA_DIR}",
-            parent=self,
         )
 
     def on_close(self) -> None:
         if self._closing:
             return
         self._closing = True
+        if self._settings_panel is not None:
+            self.close_settings()
         try:
             self.save_current(refresh=False)
         except Exception:
@@ -1623,6 +1736,17 @@ class MemoApp(ctk.CTk):
             LOG.exception("退出前备份失败")
 
 
+def _rounded_rect_points(
+    x1: float, y1: float, x2: float, y2: float, r: float
+) -> list[float]:
+    """给 Canvas 的平滑多边形用：四角各放三个点，smooth=True 时就是圆角。"""
+    return [
+        x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
+        x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2,
+        x1, y2, x1, y2 - r, x1, y1 + r, x1, y1,
+    ]
+
+
 class MenuOverlay(ctk.CTkFrame):
     """窗口内展开的卡片菜单，紧跟「⋯」按钮，视觉与便签一致。
 
@@ -1645,54 +1769,74 @@ class MenuOverlay(ctk.CTkFrame):
         self._click_bind: str | None = None
         self._esc_bind: str | None = None
 
+        linespace = int(app.font_small.metrics("linespace") or 16)
+        self._row_h = max(26, linespace + 10)
+
         for label, shortcut, command in items:
             if label is None:
                 tk.Frame(self, height=1, bg=p["border"]).pack(fill="x", padx=10, pady=3)
                 continue
-            row = tk.Frame(self, bg=p["card"], cursor="hand2")
+            # 用 Canvas 画整行：悬停时能画出带圆角的高亮，还比三个控件更省
+            row = tk.Canvas(
+                self,
+                bg=p["card"],
+                height=self._row_h,
+                bd=0,
+                highlightthickness=0,
+                cursor="hand2",
+            )
             row.pack(fill="x", padx=5, pady=1)
-            row.grid_columnconfigure(0, weight=1)
-            name = tk.Label(
-                row,
-                text=label,
+            name = row.create_text(
+                9,
+                self._row_h // 2,
                 anchor="w",
+                text=label,
                 font=app.font_small,
-                fg=p["fg"],
-                bg=p["card"],
-                padx=0,
-                pady=2,
-                cursor="hand2",
+                fill=p["fg"],
             )
-            name.grid(row=0, column=0, sticky="ew", padx=(9, 4))
-            hint = tk.Label(
-                row,
-                text=shortcut,
+            hint = row.create_text(
+                0,
+                self._row_h // 2,
                 anchor="e",
+                text=shortcut,
                 font=app.font_tiny,
-                fg=p["muted"],
-                bg=p["card"],
-                padx=0,
-                pady=2,
-                cursor="hand2",
+                fill=p["muted"],
             )
-            hint.grid(row=0, column=1, sticky="e", padx=(4, 9))
-
-            def enter(_event=None, widgets=(row, name, hint)):
-                for widget in widgets:
-                    widget.configure(bg=p["strip"])
-
-            def leave(_event=None, widgets=(row, name, hint)):
-                for widget in widgets:
-                    widget.configure(bg=p["card"])
 
             def choose(_event=None, callback=command):
                 self.close()
                 callback()
 
-            for widget in (row, name, hint):
-                widget.bind("<Enter>", enter)
-                widget.bind("<Leave>", leave)
-                widget.bind("<Button-1>", choose)
+            row.bind(
+                "<Configure>",
+                lambda _e, c=row, n=name, h=hint: self._layout_row(c, n, h),
+            )
+            row.bind("<Enter>", lambda _e, c=row: self._paint_highlight(c))
+            row.bind("<Motion>", lambda _e, c=row: self._paint_highlight(c))
+            row.bind("<Leave>", lambda _e, c=row: c.delete("hl"))
+            row.bind("<Button-1>", choose)
+
+    def _layout_row(self, canvas: tk.Canvas, name_item: int, hint_item: int) -> None:
+        height = canvas.winfo_height() or self._row_h
+        width = canvas.winfo_width()
+        canvas.coords(name_item, 9, height // 2)
+        canvas.coords(hint_item, max(9, width - 9), height // 2)
+        if canvas.find_withtag("hl"):
+            self._paint_highlight(canvas)
+
+    def _paint_highlight(self, canvas: tk.Canvas) -> None:
+        canvas.delete("hl")
+        width = canvas.winfo_width() or 200
+        height = canvas.winfo_height() or self._row_h
+        canvas.create_polygon(
+            _rounded_rect_points(1, 1, width - 1, height - 1, 8),
+            smooth=True,
+            splinesteps=12,
+            fill=PALETTE["strip"],
+            outline="",
+            tags=("hl",),
+        )
+        canvas.tag_lower("hl")
 
     def open(self) -> None:
         self._closed = False
@@ -1738,46 +1882,213 @@ class MenuOverlay(ctk.CTkFrame):
             self.app._menu = None
 
 
-class SettingsDialog(ctk.CTkToplevel):
-    """设置窗口：通用 / OneDrive / GitHub。"""
+class InWindowDialog(ctk.CTkFrame):
+    """覆盖在主窗口正文上的消息 / 确认卡片，不再弹系统对话框。
+
+    需要返回值时用 ``show()``：内部用 ``wait_variable`` 跑一个嵌套事件循环，
+    主窗口仍然可以重绘、拖动，不会出现「未响应」。
+    """
+
+    def __init__(
+        self,
+        app: "MemoApp",
+        title: str,
+        message: str,
+        *,
+        confirm: bool = False,
+        ok_text: str = "知道了",
+        cancel_text: str = "取消",
+        tone: str = "info",
+    ) -> None:
+        p = PALETTE
+        host = app._modal_host()
+        super().__init__(host, fg_color=p["bg"], corner_radius=0)
+        self.app = app
+        self._host = host
+        self.result = tk.BooleanVar(value=False)
+        self._done = False
+        self._confirm = confirm
+        self._esc_bind: str | None = None
+        app._modal_depth += 1
+
+        self.place(in_=host, relx=0, rely=0, relwidth=1, relheight=1)
+        self.lift()
+
+        card = ctk.CTkFrame(
+            self,
+            fg_color=p["card"],
+            corner_radius=18,
+            border_width=1,
+            border_color=p["border"],
+        )
+        card.place(relx=0.5, rely=0.5, anchor="center", relwidth=0.88)
+        inner = ctk.CTkFrame(card, fg_color="transparent", corner_radius=0)
+        inner.pack(fill="both", expand=True, padx=20, pady=18)
+
+        accent = {"info": p["fg"], "warning": "#A66A12", "error": "#C2503C"}.get(tone, p["fg"])
+        ctk.CTkLabel(
+            inner,
+            text=title,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=15, weight="bold"),
+            text_color=accent,
+            anchor="w",
+            justify="left",
+            wraplength=320,
+        ).pack(fill="x")
+
+        body_frame = ctk.CTkFrame(inner, fg_color="transparent", corner_radius=0)
+        body_frame.pack(fill="both", expand=True, pady=(8, 0))
+        body_frame.columnconfigure(0, weight=1)
+        if self.winfo_toplevel().winfo_width() > 0:
+            wrap = max(240, int(self.winfo_toplevel().winfo_width() * 0.72) - 60)
+        else:  # pragma: no cover - 极端情况下窗口尚未布局
+            wrap = 330
+        if len(message) > 320 or message.count("\n") > 7:
+            box = ctk.CTkTextbox(
+                body_frame,
+                height=200,
+                corner_radius=10,
+                border_width=1,
+                border_color=p["border"],
+                fg_color=p["bg"],
+                text_color=p["fg"],
+                font=self.app.font_small,
+                wrap="word",
+            )
+            box.grid(row=0, column=0, sticky="ew")
+            box.insert("1.0", message)
+            box.configure(state="disabled")
+        else:
+            ctk.CTkLabel(
+                body_frame,
+                text=message,
+                font=self.app.font_small,
+                text_color=p["fg"],
+                anchor="w",
+                justify="left",
+                wraplength=wrap,
+            ).grid(row=0, column=0, sticky="ew")
+
+        buttons = ctk.CTkFrame(inner, fg_color="transparent", corner_radius=0)
+        buttons.pack(fill="x", pady=(16, 0))
+        ctk.CTkButton(
+            buttons,
+            text=ok_text,
+            width=96,
+            height=34,
+            corner_radius=9,
+            fg_color=p["accent"],
+            hover_color=p["accent_hover"],
+            text_color="#3B3323",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=13, weight="bold"),
+            command=lambda: self._finish(True),
+        ).pack(side="right")
+        if confirm:
+            ctk.CTkButton(
+                buttons,
+                text=cancel_text,
+                width=80,
+                height=34,
+                corner_radius=9,
+                fg_color="transparent",
+                hover_color=p["strip"],
+                text_color=p["fg"],
+                border_width=1,
+                border_color=p["border"],
+                font=ctk.CTkFont(family=FONT_FAMILY, size=13),
+                command=lambda: self._finish(False),
+            ).pack(side="right", padx=(0, 8))
+
+        self._esc_bind = app.bind("<Escape>", self._on_escape, add="+")
+
+    def show(self) -> bool:
+        self.focus_set()
+        try:
+            self.app.wait_variable(self.result)
+        except tk.TclError:  # pragma: no cover - 主窗口在等待期间关闭
+            return False
+        return bool(self.result.get())
+
+    def _on_escape(self, _event=None) -> None:
+        self._finish(False)
+
+    def _finish(self, value: bool) -> None:
+        if self._done:
+            return
+        self._done = True
+        if self._esc_bind is not None:
+            try:
+                self.app.unbind("<Escape>", self._esc_bind)
+            except tk.TclError:
+                pass
+            self._esc_bind = None
+        self.result.set(value)
+        self.app._modal_depth = max(0, self.app._modal_depth - 1)
+        self.destroy()
+
+
+class SettingsPanel(ctk.CTkFrame):
+    """设置面板：覆盖在主窗口内，不再打开独立窗口。"""
 
     def __init__(self, app: MemoApp) -> None:
-        super().__init__(app)
+        super().__init__(app, fg_color=PALETTE["bg"], corner_radius=0)
         self.app = app
         self.cfg = app.cfg
         self.vars: dict[str, tk.Variable] = {}
-        self.title("MemoNest 设置")
-        self.geometry("700x680")
-        self.minsize(640, 560)
-        self.configure(fg_color=PALETTE["bg"])
-        self.transient(app)
-        apply_icon(self)
+        self._closed = False
+        self._saved_geometry = app.geometry()
+        try:
+            self._saved_state = app.state()
+        except tk.TclError:  # pragma: no cover
+            self._saved_state = "normal"
+        self._esc_bind: str | None = None
+
+        self.place(in_=app, relx=0, rely=0, relwidth=1, relheight=1)
+        self.lift()
+        self._fit_window()
         self._build()
-        self.grab_set()
-        self.bind("<Escape>", lambda _e: self._cancel())
-        self.bind("<Map>", self._on_map, add="+")
-        self.protocol("WM_DELETE_WINDOW", self._cancel)
-        self.after(150, self._style_frame)
-        self.after(700, self._style_frame)
-        self.after(1500, self._style_frame)
+        self._esc_bind = app.bind(
+            "<Escape>", lambda _e: None if app._modal_depth else self._cancel(), add="+"
+        )
         self.focus_set()
 
-    def _on_map(self, event=None) -> None:
-        if event is None or event.widget is self:
-            self.after(60, self._style_frame)
-
-    def _style_frame(self) -> None:
-        winstyle.apply(self, PALETTE["bg"], PALETTE["fg"], PALETTE["border"])
+    def _fit_window(self) -> None:
+        try:
+            screen_w = self.winfo_screenwidth()
+            screen_h = self.winfo_screenheight()
+            width = min(max(self.app.winfo_width(), 700), screen_w - 80)
+            height = min(max(self.app.winfo_height(), 660), screen_h - 140)
+            x = max(10, min(self.app.winfo_x(), screen_w - width - 40))
+            y = max(10, min(self.app.winfo_y(), screen_h - height - 80))
+            self.app.geometry(f"{width}x{height}+{x}+{y}")
+        except tk.TclError:  # pragma: no cover
+            pass
 
     def _build(self) -> None:
         p = PALETTE
         wrapper = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
         wrapper.pack(fill="both", expand=True, padx=16, pady=14)
 
+        head = ctk.CTkFrame(wrapper, fg_color="transparent", corner_radius=0)
+        head.pack(fill="x", pady=(0, 6))
         ctk.CTkLabel(
-            wrapper, text="设置", font=ctk.CTkFont(family=FONT_FAMILY, size=19, weight="bold"),
+            head, text="设置", font=ctk.CTkFont(family=FONT_FAMILY, size=19, weight="bold"),
             text_color=p["fg"],
-        ).pack(anchor="w", pady=(0, 6))
+        ).pack(side="left")
+        ctk.CTkButton(
+            head,
+            text="返回便签",
+            width=84,
+            height=30,
+            corner_radius=8,
+            fg_color="transparent",
+            hover_color=p["strip"],
+            text_color=p["muted"],
+            border_width=1,
+            border_color=p["border"],
+            font=self.app.font_tiny,
+            command=self._cancel,
+        ).pack(side="right")
 
         self.nb = ctk.CTkTabview(
             wrapper,
@@ -1945,16 +2256,19 @@ class SettingsDialog(ctk.CTkToplevel):
 
     def _build_general(self, frame) -> None:
         self._field(frame, 0, "开机自动启动", "general.autostart", "bool")
-        self._field(
-            frame, 1, "退出时自动云备份", "general.backup_on_exit", "bool",
+        self._field(frame, 1, "退出时自动云备份", "general.backup_on_exit", "bool",
             hint="检测到有改动且已启用云备份通道时，退出前会执行一次备份。",
         )
         self._field(
-            frame, 3, "定时备份（分钟）", "general.auto_backup_minutes", width=90,
+            frame, 2, "窗口始终置顶", "general.always_on_top", "bool",
+            hint="开启后便签窗口会停留在其他窗口上方。",
+        )
+        self._field(
+            frame, 4, "定时备份（分钟）", "general.auto_backup_minutes", width=90,
             hint="0 表示关闭定时备份；建议 30～120 分钟。",
         )
         self._field(
-            frame, 5, "本地保留备份数", "general.keep_backups", width=90,
+            frame, 6, "本地保留备份数", "general.keep_backups", width=90,
             hint="data/backups 中保留的 zip 数量，旧的会自动清理。",
         )
         ctk.CTkLabel(
@@ -2345,10 +2659,10 @@ class SettingsDialog(ctk.CTkToplevel):
 
     def _create_vault(self) -> None:
         if self.app.vault is not None:
-            self.destroy()
+            self.app.close_settings()
             self.app.open_vault_panel("unlock")
             return
-        self.destroy()
+        self.app.close_settings()
         self.app.open_vault_panel("create")
 
     def _toggle_hello(self) -> None:
@@ -2379,20 +2693,20 @@ class SettingsDialog(ctk.CTkToplevel):
     def _change_password(self) -> None:
         if self.app.vault is None:
             return
-        self.destroy()
+        self.app.close_settings()
         self.app.open_vault_panel("password")
 
     def _lock_now(self) -> None:
-        self.destroy()
+        self.app.close_settings()
         self.app.lock_vault()
 
     def _create_shortcut(self) -> None:
         try:
             target = shortcut.create_desktop_shortcut()
         except Exception as exc:
-            messagebox.showerror("创建快捷方式", str(exc), parent=self)
+            self.app.show_error("创建快捷方式", str(exc))
             return
-        messagebox.showinfo("创建快捷方式", f"已创建：\n{target}", parent=self)
+        self.app.show_info("创建快捷方式", f"已创建：\n{target}")
 
     def _build_github(self, frame) -> None:
         p = PALETTE
@@ -2443,7 +2757,7 @@ class SettingsDialog(ctk.CTkToplevel):
         if detected:
             var.set(str(detected))
         else:
-            messagebox.showwarning("自动检测", "未找到 OneDrive 文件夹，请手动选择。", parent=self)
+            self.app.show_warning("自动检测", "未找到 OneDrive 文件夹，请手动选择。")
 
     def _collect(self) -> None:
         numeric = {
@@ -2467,19 +2781,20 @@ class SettingsDialog(ctk.CTkToplevel):
         try:
             self.cfg.save()
         except OSError as exc:
-            messagebox.showerror("保存失败", str(exc), parent=self)
+            self.app.show_error("保存失败", str(exc))
             return
         try:
             autostart.set_enabled(bool(self.cfg.get("general.autostart")))
         except Exception as exc:
-            messagebox.showwarning("开机自启", f"写入注册表失败：{exc}", parent=self)
+            self.app.show_warning("开机自启", f"写入注册表失败：{exc}")
         self.app._schedule_auto_backup()
+        self.app._apply_topmost()
         self.app.set_status("设置已保存")
-        self.destroy()
+        self.app.close_settings()
 
     def _cancel(self) -> None:
         self.cfg.load()
-        self.destroy()
+        self.app.close_settings()
 
     def _run_async(self, label: str, task) -> None:
         self.app.set_status(f"{label}…")
@@ -2496,8 +2811,10 @@ class SettingsDialog(ctk.CTkToplevel):
 
     def _show_result(self, label: str, ok: bool, detail: str) -> None:
         self.app.set_status(label + ("完成" if ok else "失败"))
-        dialog = messagebox.showinfo if ok else messagebox.showerror
-        dialog(label, detail, parent=self.app)
+        if ok:
+            self.app.show_info(label, detail)
+        else:
+            self.app.show_error(label, detail)
 
     def _sync_onedrive(self) -> None:
         self._collect()
@@ -2516,11 +2833,10 @@ class SettingsDialog(ctk.CTkToplevel):
         self._collect()
         client_id = str(self.cfg.get("onedrive.client_id", "") or "").strip()
         if not client_id:
-            messagebox.showwarning(
+            self.app.show_warning(
                 "OneDrive 登录",
                 "请先填写 Azure 应用的「应用程序（客户端）ID」。\n"
                 "可点下方「打开 Azure 应用注册页」免费注册。",
-                parent=self,
             )
             return
         tenant = str(self.cfg.get("onedrive.tenant", "common") or "common").strip()
@@ -2530,11 +2846,11 @@ class SettingsDialog(ctk.CTkToplevel):
             flow = onedrive.start_device_flow(client_id, tenant)
         except Exception as exc:
             self.app.set_status("OneDrive 登录失败")
-            messagebox.showerror("OneDrive 登录", str(exc), parent=self)
+            self.app.show_error("OneDrive 登录", str(exc))
             return
 
         stop = threading.Event()
-        dialog = DeviceCodeDialog(self.app, flow, on_closed=stop.set)
+        dialog = DeviceCodePanel(self.app, flow, parent=self, on_closed=stop.set)
         self._login_dialog = dialog
         device_code = str(flow.get("device_code", ""))
         interval = int(flow.get("interval", 5) or 5)
@@ -2560,8 +2876,11 @@ class SettingsDialog(ctk.CTkToplevel):
 
     def _login_ok(self, name: str, dialog) -> None:
         self.app.set_status("OneDrive 已登录")
-        if dialog is not None and dialog.winfo_exists():
-            dialog.succeed(name)
+        try:
+            if dialog is not None and dialog.winfo_exists():
+                dialog.succeed(name)
+        except tk.TclError:
+            pass
         try:
             if not self.winfo_exists():
                 return
@@ -2578,7 +2897,7 @@ class SettingsDialog(ctk.CTkToplevel):
             pass
 
     def _logout_onedrive(self) -> None:
-        if not messagebox.askyesno("退出登录", "确定退出 Microsoft 账号登录吗？", parent=self):
+        if not self.app.ask_yes_no("退出登录", "确定退出 Microsoft 账号登录吗？"):
             return
         onedrive.logout(self.cfg)
         self._refresh_onedrive_status()
@@ -2587,7 +2906,7 @@ class SettingsDialog(ctk.CTkToplevel):
     def _push_github(self) -> None:
         self._collect()
         if not str(self.cfg.get("github.repo", "") or "").strip():
-            messagebox.showwarning("GitHub", "请先填写仓库，格式为 用户名/仓库名。", parent=self)
+            self.app.show_warning("GitHub", "请先填写仓库，格式为 用户名/仓库名。")
             return
         self._run_async("GitHub 推送", lambda: backup.push_to_github(self.cfg))
 
@@ -2602,34 +2921,44 @@ class SettingsDialog(ctk.CTkToplevel):
             )
             target.mkdir(parents=True, exist_ok=True)
         except Exception as exc:
-            messagebox.showerror("打开失败", str(exc), parent=self)
+            self.app.show_error("打开失败", str(exc))
             return
         try:
             os.startfile(str(target))
         except OSError as exc:
-            messagebox.showerror("打开失败", str(exc), parent=self)
+            self.app.show_error("打开失败", str(exc))
 
 
-class DeviceCodeDialog(ctk.CTkToplevel):
-    """显示 Microsoft 设备代码，等待浏览器授权。"""
+class DeviceCodePanel(ctk.CTkFrame):
+    """在主窗口内显示 Microsoft 设备代码，等待浏览器授权。"""
 
-    def __init__(self, app: MemoApp, flow: dict, on_closed=None) -> None:
-        super().__init__(app)
+    def __init__(self, app: MemoApp, flow: dict, parent=None, on_closed=None) -> None:
+        host = parent if parent is not None else app.body
+        p = PALETTE
+        super().__init__(host, fg_color=p["bg"], corner_radius=0)
         self.app = app
         self.on_closed = on_closed
         self._closed = False
+        self._esc_bind: str | None = None
         self._code = str(flow.get("user_code") or "")
         self._uri = str(flow.get("verification_uri") or "https://microsoft.com/devicelogin")
-        p = PALETTE
-        self.title("登录 Microsoft 账号")
-        self.geometry("440x360")
-        self.resizable(False, False)
-        self.configure(fg_color=p["bg"])
-        self.transient(app)
-        apply_icon(self)
-        self.protocol("WM_DELETE_WINDOW", self._close)
 
-        wrap = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
+        self.place(in_=host, relx=0, rely=0, relwidth=1, relheight=1)
+        self.lift()
+        app._modal_depth += 1
+        self._esc_bind = app.bind(
+            "<Escape>", lambda _e: None if self._closed else self._close(), add="+"
+        )
+
+        card = ctk.CTkFrame(
+            self,
+            fg_color=p["card"],
+            corner_radius=18,
+            border_width=1,
+            border_color=p["border"],
+        )
+        card.place(relx=0.5, rely=0.5, anchor="center", relwidth=0.82)
+        wrap = ctk.CTkFrame(card, fg_color="transparent", corner_radius=0)
         wrap.pack(fill="both", expand=True, padx=20, pady=18)
         ctk.CTkLabel(
             wrap,
@@ -2645,7 +2974,7 @@ class DeviceCodeDialog(ctk.CTkToplevel):
             text_color=p["muted"],
             anchor="w",
             justify="left",
-            wraplength=390,
+            wraplength=340,
         ).pack(anchor="w", pady=(4, 10))
 
         self.code_label = ctk.CTkLabel(
@@ -2653,7 +2982,7 @@ class DeviceCodeDialog(ctk.CTkToplevel):
             text=self._code,
             font=ctk.CTkFont(family=MONO_FAMILY, size=26, weight="bold"),
             text_color=p["fg"],
-            fg_color=p["card"],
+            fg_color=p["bg"],
             corner_radius=10,
             height=58,
         )
@@ -2678,7 +3007,7 @@ class DeviceCodeDialog(ctk.CTkToplevel):
             text_color=p["muted"],
             anchor="w",
             justify="left",
-            wraplength=390,
+            wraplength=340,
         )
         self.status.pack(anchor="w", pady=(10, 0))
 
@@ -2697,12 +3026,7 @@ class DeviceCodeDialog(ctk.CTkToplevel):
         )
         self.cancel_button.pack(fill="x", side="bottom", pady=(10, 0))
 
-        self.after(120, self._style)
         self.after(220, self._open)
-        self.grab_set()
-
-    def _style(self) -> None:
-        winstyle.apply(self, PALETTE["bg"], PALETTE["fg"], PALETTE["border"])
 
     def _open(self) -> None:
         try:
@@ -2734,10 +3058,13 @@ class DeviceCodeDialog(ctk.CTkToplevel):
         if self._closed:
             return
         self._closed = True
-        try:
-            self.grab_release()
-        except tk.TclError:
-            pass
+        if self._esc_bind is not None:
+            try:
+                self.app.unbind("<Escape>", self._esc_bind)
+            except tk.TclError:
+                pass
+            self._esc_bind = None
+        self.app._modal_depth = max(0, self.app._modal_depth - 1)
         if self.on_closed is not None:
             try:
                 self.on_closed()
