@@ -1,4 +1,4 @@
-# 把 MemoNest 项目上传到 GitHub
+﻿# 把 MemoNest 项目上传到 GitHub
 # 用法：
 #   .\upload_to_github.ps1 -Repo "用户名/仓库名" -Token "ghp_xxx"
 #   .\upload_to_github.ps1 -Repo "用户名/仓库名" -Token "ghp_xxx" -Public
