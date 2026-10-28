@@ -1,42 +1,54 @@
 @echo off
-chcp 65001 >nul
+setlocal
 cd /d "%~dp0"
 
-rem ---- 定位虚拟环境的解释器（Windows 布局 Scripts\，MSYS2 布局 bin\）----
+rem ---- Locate the virtualenv interpreter (Windows Scripts\ or POSIX bin\) ----
 set "PY=.venv\Scripts\python.exe"
 set "PYW=.venv\Scripts\pythonw.exe"
 if exist ".venv\bin\python.exe" (
     set "PY=.venv\bin\python.exe"
-    set "PYW=.venv\bin\pythonw.exe"
+    set "PYW=.venv\bin\python.exe"
 )
 
 if not exist "%PY%" goto setup
+if not exist "%PYW%" set "PYW=%PY%"
 goto deps
 
 :setup
-echo [MemoNest] 首次运行，正在创建虚拟环境…
-python -m venv .venv
+echo [MemoNest] First run: creating virtual environment...
+where py >nul 2>nul
+if errorlevel 1 (
+    python -m venv .venv
+) else (
+    py -3 -m venv .venv
+)
 if errorlevel 1 goto fail
+if exist ".venv\Scripts\python.exe" (
+    set "PY=.venv\Scripts\python.exe"
+    set "PYW=.venv\Scripts\pythonw.exe"
+)
 if exist ".venv\bin\python.exe" (
     set "PY=.venv\bin\python.exe"
-    set "PYW=.venv\bin\pythonw.exe"
+    set "PYW=.venv\bin\python.exe"
 )
+if not exist "%PYW%" set "PYW=%PY%"
 
 :deps
-"%PY%" -c "import customtkinter" >nul 2>nul
+"%PY%" -c "import customtkinter, cryptography" >nul 2>nul
 if not errorlevel 1 goto run
-echo [MemoNest] 正在安装界面依赖 customtkinter…
+echo [MemoNest] Installing dependencies...
 "%PY%" -m pip install --upgrade pip >nul 2>nul
 "%PY%" -m pip install -r requirements.txt
 if errorlevel 1 goto fail
 
 :run
+rem Start with pythonw so no console window stays open
 start "" "%PYW%" app.py
 exit /b 0
 
 :fail
 echo.
-echo [MemoNest] 启动失败。请确认已安装 Python 3.10+ 并加入 PATH，
-echo             然后再次双击 start.bat。
+echo [MemoNest] Startup failed. Install Python 3.10+ (with tcl/tk),
+echo            make sure "py -3" or "python" works, then run start.bat again.
 pause
 exit /b 1

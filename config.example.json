@@ -1,10 +1,17 @@
 {
   "onedrive": {
     "enabled": false,
+    "mode": "folder",
     "folder": "",
     "subfolder": "MemoNest备份",
     "mirror_notes": true,
-    "keep_backups": 30
+    "keep_backups": 30,
+    "client_id": "",
+    "tenant": "common",
+    "access_token": "",
+    "refresh_token": "",
+    "expires_at": 0,
+    "account": ""
   },
   "github": {
     "enabled": false,
@@ -21,6 +28,7 @@
     "backup_on_exit": true,
     "keep_backups": 20,
     "window_geometry": "",
-    "always_on_top": false
+    "always_on_top": false,
+    "hello_unlock": true
   }
 }

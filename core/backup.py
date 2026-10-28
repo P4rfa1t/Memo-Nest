@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -12,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import config as cfgmod
+from . import onedrive
 
 LOG = logging.getLogger("memonest.backup")
 
@@ -54,6 +56,7 @@ def create_backup_zip(
     index_path: Path = cfgmod.INDEX_PATH,
     backup_dir: Path = cfgmod.BACKUP_DIR,
     keep: int = 20,
+    vault: bool = False,
 ) -> Path:
     backup_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -63,8 +66,34 @@ def create_backup_zip(
             archive.write(note_file, f"notes/{note_file.name}")
         if index_path.exists():
             archive.write(index_path, "index.json")
+        if vault:
+            for item in sorted(cfgmod.VAULT_ITEMS_DIR.glob("*.mdenc")):
+                archive.write(item, f"vault/items/{item.name}")
+            meta = cfgmod.VAULT_META_PATH
+            if meta.exists():
+                try:
+                    payload = json.loads(meta.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    payload = {}
+                payload.pop("dpapi_key", None)  # 机器绑定的密钥不随备份走
+                archive.writestr(
+                    "vault/vault.json",
+                    json.dumps(payload, ensure_ascii=False, indent=2),
+                )
     _prune(path.parent, "memo-backup-*.zip", keep)
     return path
+
+
+def vault_present() -> bool:
+    """是否存在私密笔记库（只看文件，不看配置）。"""
+    return cfgmod.VAULT_META_PATH.exists()
+
+
+def create_zip_for(cfg) -> Path:
+    return create_backup_zip(
+        keep=int(cfg.get("general.keep_backups", 20) or 20),
+        vault=vault_present(),
+    )
 
 
 def _prune(folder: Path, pattern: str, keep: int) -> None:
@@ -101,10 +130,20 @@ def resolve_onedrive_folder(cfg) -> Path:
 def sync_onedrive(
     cfg,
     zip_path: Path | None,
-    notes_dir: Path = cfgmod.NOTES_DIR,
-    index_path: Path = cfgmod.INDEX_PATH,
+    notes_dir: Path | None = None,
+    index_path: Path | None = None,
+    vault: bool | None = None,
 ) -> str:
-    """把笔记镜像 + 备份包复制到 OneDrive 同步目录。"""
+    """按配置的同步方式备份到 OneDrive（普通笔记 + 私密库密文）。"""
+    include_vault = vault_present() if vault is None else vault
+    notes_dir = Path(notes_dir or cfgmod.NOTES_DIR)
+    index_path = Path(index_path or cfgmod.INDEX_PATH)
+
+    mode = str(cfg.get("onedrive.mode", "folder") or "folder")
+    if mode == "graph":
+        return onedrive.sync(cfg, zip_path, notes_dir, index_path, vault=include_vault)
+
+    # ---- 文件夹模式：复制到 OneDrive 客户端同步目录 ----
     root = resolve_onedrive_folder(cfg)
     subfolder = str(cfg.get("onedrive.subfolder", "MemoNest备份") or "MemoNest备份")
     target = root / subfolder
@@ -127,6 +166,33 @@ def sync_onedrive(
                     pass
         if index_path.exists():
             shutil.copy2(index_path, target / "index.json")
+
+        if include_vault:
+            vault_target = target / "vault"
+            items_target = vault_target / "items"
+            items_target.mkdir(parents=True, exist_ok=True)
+            encrypted: set[str] = set()
+            for item in sorted(cfgmod.VAULT_ITEMS_DIR.glob("*.mdenc")):
+                shutil.copy2(item, items_target / item.name)
+                encrypted.add(item.name)
+                copied += 1
+            for stale in items_target.glob("*.mdenc"):
+                if stale.name not in encrypted:
+                    try:
+                        stale.unlink()
+                    except OSError:
+                        pass
+            if cfgmod.VAULT_META_PATH.exists():
+                try:
+                    payload = json.loads(
+                        cfgmod.VAULT_META_PATH.read_text(encoding="utf-8")
+                    )
+                except (OSError, json.JSONDecodeError):
+                    payload = {}
+                payload.pop("dpapi_key", None)  # 只上传包裹后的密钥
+                (vault_target / "vault.json").write_text(
+                    json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
 
     if zip_path and zip_path.exists():
         shutil.copy2(zip_path, target / zip_path.name)
@@ -176,10 +242,52 @@ def _remote_url(cfg) -> str:
     return f"https://x-access-token:{token}@github.com/{repo}.git"
 
 
-def push_to_github(cfg, notes_dir: Path = cfgmod.NOTES_DIR) -> str:
+def _stage_github_source() -> Path:
+    """把普通笔记与私密库密文汇总到一个临时目录，避免污染 data/notes。"""
+    staging = cfgmod.DATA_DIR / "github"
+    staging.mkdir(parents=True, exist_ok=True)
+    current: set[str] = set()
+    for note_file in sorted(cfgmod.NOTES_DIR.glob("*.md")):
+        shutil.copy2(note_file, staging / note_file.name)
+        current.add(note_file.name)
+    for stale in staging.glob("*.md"):
+        if stale.name not in current:
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+
+    items_target = staging / "vault" / "items"
+    items_target.mkdir(parents=True, exist_ok=True)
+    encrypted: set[str] = set()
+    for item in sorted(cfgmod.VAULT_ITEMS_DIR.glob("*.mdenc")):
+        shutil.copy2(item, items_target / item.name)
+        encrypted.add(item.name)
+    for stale in items_target.glob("*.mdenc"):
+        if stale.name not in encrypted:
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+    if cfgmod.VAULT_META_PATH.exists():
+        try:
+            payload = json.loads(cfgmod.VAULT_META_PATH.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+        payload.pop("dpapi_key", None)
+        (staging / "vault" / "vault.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    return staging
+
+
+def push_to_github(cfg, notes_dir: Path | None = None) -> str:
     if shutil.which("git") is None:
         raise BackupError("未检测到 Git，请先安装 https://git-scm.com/download/win")
 
+    if notes_dir is None:
+        notes_dir = _stage_github_source() if vault_present() else cfgmod.NOTES_DIR
+    notes_dir = Path(notes_dir)
     notes_dir.mkdir(parents=True, exist_ok=True)
     branch = str(cfg.get("github.branch", "main") or "main").strip() or "main"
     url = _remote_url(cfg)
@@ -243,9 +351,7 @@ def run_backup(cfg, create_zip: bool = True) -> BackupReport:
     zip_path: Path | None = None
     if create_zip:
         try:
-            zip_path = create_backup_zip(
-                keep=int(cfg.get("general.keep_backups", 20) or 20)
-            )
+            zip_path = create_zip_for(cfg)
             report.zip_path = zip_path
             report.steps.append(Step("本地打包", True, zip_path.name))
         except Exception as exc:

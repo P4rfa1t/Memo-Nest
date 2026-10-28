@@ -1,3 +1,13 @@
-# MemoNest 界面依赖
-# 纯标准库之外只需要 CustomTkinter（现代圆角控件，内存占用与 tkinter 相近）
+# MemoNest 依赖
+# 界面：CustomTkinter（现代圆角控件，内存占用与 tkinter 相近）
 customtkinter>=5.2.2
+
+# 加密笔记库：AES-256-GCM
+cryptography>=42
+
+# Windows Hello 验证（可选，缺失时自动退回主密码解锁）
+winrt-runtime>=3.1
+winrt-Windows.Foundation>=3.1
+winrt-Windows.Foundation.Collections>=3.1
+winrt-Windows.Storage.Streams>=3.1
+winrt-Windows.Security.Credentials.UI>=3.1

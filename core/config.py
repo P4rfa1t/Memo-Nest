@@ -21,16 +21,27 @@ DATA_DIR = APP_ROOT / "data"
 NOTES_DIR = DATA_DIR / "notes"
 TRASH_DIR = DATA_DIR / "trash"
 BACKUP_DIR = DATA_DIR / "backups"
+VAULT_DIR = DATA_DIR / "vault"
+VAULT_ITEMS_DIR = VAULT_DIR / "items"
+VAULT_TRASH_DIR = VAULT_DIR / "trash"
+VAULT_META_PATH = VAULT_DIR / "vault.json"
 INDEX_PATH = DATA_DIR / "index.json"
 LOG_PATH = DATA_DIR / "memo.log"
 
 DEFAULTS: dict[str, Any] = {
     "onedrive": {
         "enabled": False,
+        "mode": "folder",
         "folder": "",
         "subfolder": "MemoNest备份",
         "mirror_notes": True,
         "keep_backups": 30,
+        "client_id": "",
+        "tenant": "common",
+        "access_token": "",
+        "refresh_token": "",
+        "expires_at": 0,
+        "account": "",
     },
     "github": {
         "enabled": False,
@@ -48,6 +59,7 @@ DEFAULTS: dict[str, Any] = {
         "keep_backups": 20,
         "window_geometry": "",
         "always_on_top": False,
+        "hello_unlock": True,
     },
 }
 

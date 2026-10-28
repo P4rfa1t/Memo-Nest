@@ -209,7 +209,7 @@ class BackupTests(unittest.TestCase):
     def test_onedrive_sync(self) -> None:
         cfg = self._config()
         zip_path = backup.create_backup_zip(self.notes, self.index, self.base / "backups")
-        detail = backup.sync_onedrive(cfg, zip_path, self.notes, self.index)
+        detail = backup.sync_onedrive(cfg, zip_path, self.notes, self.index, vault=False)
         target = self.base / "OneDrive" / "备份"
         self.assertIn("已同步 2 篇笔记", detail)
         self.assertTrue((target / "notes" / "a.md").exists())
@@ -217,7 +217,7 @@ class BackupTests(unittest.TestCase):
         self.assertTrue((target / "index.json").exists())
 
         (self.notes / "b.md").unlink()
-        backup.sync_onedrive(cfg, zip_path, self.notes, self.index)
+        backup.sync_onedrive(cfg, zip_path, self.notes, self.index, vault=False)
         self.assertFalse((target / "notes" / "b.md").exists())
 
     def test_onedrive_missing_folder(self) -> None:

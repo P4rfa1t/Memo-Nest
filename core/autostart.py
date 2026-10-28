@@ -13,9 +13,17 @@ APP_SCRIPT = APP_ROOT / "app.py"
 
 
 def _pythonw() -> str:
+    """优先使用同目录下的 pythonw（无控制台）；找不到才退回当前解释器。"""
     executable = Path(sys.executable)
-    if executable.name.lower() == "python.exe":
-        candidate = executable.with_name("pythonw.exe")
+    name = executable.name.lower()
+    if name.endswith("w.exe"):
+        return str(executable)
+    if name.endswith(".exe"):
+        candidate = executable.with_name(executable.name[:-4] + "w.exe")
+        if candidate.exists():
+            return str(candidate)
+    for fallback in ("pythonw.exe", "python3w.exe"):
+        candidate = executable.with_name(fallback)
         if candidate.exists():
             return str(candidate)
     return str(executable)
