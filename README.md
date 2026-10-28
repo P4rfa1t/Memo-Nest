@@ -6,6 +6,7 @@
 
 界面使用 [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter) 绘制，
 圆角卡片 + 与纸面同色的标题栏，运行时内存约 40–60 MB，不需要 Electron 或 Qt。
+可以直接下载打包好的单文件 `MemoNest.exe`，也可以用源码运行。
 
 ![MemoNest 便签](docs/screenshot.png)
 
@@ -17,9 +18,22 @@
 </details>
 
 <details>
-<summary>私密笔记库</summary>
+<summary>卡片菜单（缓存后即时展开）</summary>
+
+![卡片菜单](docs/screenshot-menu.png)
+
+</details>
+
+<details>
+<summary>私密笔记库：全部操作都在主窗口内完成</summary>
 
 ![私密库](docs/screenshot-vault.png)
+
+![解锁面板](docs/screenshot-vault-panel.png)
+
+![创建私密库](docs/screenshot-vault-create.png)
+
+![Windows Hello 验证中](docs/screenshot-vault-hello.png)
 
 ![私密库设置](docs/screenshot-settings-vault.png)
 
@@ -27,15 +41,17 @@
 
 ## 功能
 
-- **小便签窗口**：默认 420×620，单条笔记视图，可置顶、记忆窗口位置和大小
+- **小便签窗口**：默认 440×640，单条笔记视图，可置顶、记忆窗口位置和大小
 - **Markdown**：编辑 + 应用内渲染预览，支持标题、列表、任务列表、表格、代码块、引用、链接
 - **基础备忘录**：新建、下拉切换、搜索、标签、置顶笔记、删除（进回收站）、导出 `.md`
 - **选择性私密库**：只把私密便签移进去，逐条 AES-256-GCM 加密；顶栏「便签 / 私密」切换，主密码或 Windows Hello 解锁
+- **内嵌面板**：私密库的创建 / 解锁 / 改密 / Hello 验证都覆盖在主窗口正文区，不弹额外窗口，顶栏始终保留
 - **自动保存**：停止输入约 1 秒后写入磁盘，关闭窗口时也会保存
 - **OneDrive 云备份**：两种方式——镜像到 OneDrive 同步文件夹，或直接登录 Microsoft 账号用 Graph API 上传
 - **GitHub 同步**：把笔记以 Markdown 文件提交并推送到你的仓库，私密便签只上传密文
 - **备份策略**：手动、定时（分钟）、退出前自动备份
 - **开机自启**：写入当前用户注册表 `Run` 项，可在设置中开关
+- **单文件 exe**：PyInstaller onefile 打包，双击即用；GitHub Actions 自动编译并发布 Release
 - **本地优先**：普通便签就是 `data/notes/*.md`，任何编辑器都能打开
 
 ## 环境要求
@@ -67,6 +83,43 @@ python -m venv .venv
 
 首次启动会自动创建 `data/notes/` 和一篇欢迎便签。私密笔记库不会自动出现，
 只有在「设置 → 私密库」里主动创建后才会生成 `data/vault/`。
+
+## 直接使用单文件 exe
+
+不想装 Python？从 [Releases](https://github.com/P4rfa1t/Memo-Nest/releases)
+下载 `MemoNest.exe`，放到任意目录双击即可。`main` 分支的 Actions 构建产物
+在对应 workflow 运行的 **Artifacts** 里也能下载。
+
+![单文件 exe](docs/screenshot-exe.png)
+
+- 首次启动在 exe 旁边创建 `data/` 和 `config.json`，**不写系统目录**
+- 迁移或备份 = 把 `MemoNest.exe`、`data/`、`config.json` 一起搬走
+- 用 exe 运行时，开机自启与桌面快捷方式会指向 exe 本身
+- 程序未做代码签名，SmartScreen 可能提示「未知发布者」，
+  点「更多信息 → 仍要运行」即可
+
+## 自行打包与 GitHub Actions
+
+打包配置在 `MemoNest.spec`（onefile、`console=False`、收集 customtkinter 与 winrt）：
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install pyinstaller
+.\.venv\Scripts\python.exe -m PyInstaller MemoNest.spec --noconfirm --clean
+```
+
+产物是 `dist/MemoNest.exe`，单文件约 19 MB，双击不弹控制台。frozen 模式下
+程序把数据写在 exe 所在目录，图标等只读资源从 PyInstaller 的临时解包目录读取。
+
+`.github/workflows/build.yml` 已配置自动编译（`windows-latest` + Python 3.12）：
+
+- push 到 `main`、提交 PR，或在 Actions 页面手动 `Run workflow`：
+  跑单元测试 → 打包 → 上传 Artifacts
+- 推送 `v*` 标签时额外创建 Release 并附上 exe：
+
+```powershell
+git tag v1.0.0
+git push origin v1.0.0
+```
 
 ## 界面
 
@@ -114,6 +167,7 @@ python -m venv .venv
 备忘录/
 ├─ app.py                 主界面（CustomTkinter）
 ├─ MemoNest.pyw           无控制台启动入口
+├─ MemoNest.spec          PyInstaller 单文件打包配置
 ├─ core/
 │  ├─ config.py           配置、路径、OneDrive 检测
 │  ├─ storage.py          普通笔记读写、索引、搜索
@@ -130,6 +184,7 @@ python -m venv .venv
 ├─ assets/icon.ico        应用图标
 ├─ docs/                  截图
 ├─ tools/make_icon.py     图标生成脚本（纯标准库）
+├─ .github/workflows/build.yml  GitHub Actions：测试 + 打包 + Release
 ├─ data/                  运行后生成（已 gitignore）
 │  ├─ notes/              普通便签，每篇一个 .md 文件
 │  ├─ trash/              删除的普通便签
@@ -144,8 +199,12 @@ python -m venv .venv
 ├─ config.example.json    配置示例
 ├─ start.bat              一键启动（自动建 venv、装依赖）
 ├─ upload_to_github.ps1   一键上传本项目到 GitHub
+├─ LICENSE                MIT 许可证
 └─ tests/                 单元测试（test_core.py / test_vault.py）
 ```
+
+> 用 `dist/MemoNest.exe` 运行时，`data/` 与 `config.json` 生成在 exe 所在目录，
+> 而不是项目目录。
 
 ## OneDrive 云备份
 
@@ -206,11 +265,15 @@ python -m venv .venv
 
 只有你主动移进去的便签才会加密，普通便签不受影响。
 
-1. 「设置 → 私密库」→「创建私密笔记库…」，设置一个至少 6 位的主密码
+1. 顶栏切到「私密」，或「设置 → 私密库」→「创建私密笔记库…」，
+   在主窗口里设置一个至少 6 位的主密码
 2. 在普通便签里打开 `⋯` 菜单 →「移到私密笔记库」
-3. 顶栏切到「私密」，输入主密码或直接用 Windows Hello 解锁
+3. 再次切到「私密」时，在同一个窗口里输入主密码或点「使用 Windows Hello 解锁」
 4. 想移出来：私密库中 `⋯` →「移回普通便签」
 5. `Ctrl+L` 立即锁定；关闭程序时也会自动锁定
+
+私密库的所有交互（创建、解锁、改主密码、Hello 验证）都覆盖在主窗口正文区，
+**不会弹出额外窗口**；顶栏的「便签 / 私密」始终保留，随时可以点「便签」收起面板。
 
 实现要点：
 
@@ -220,6 +283,7 @@ python -m venv .venv
   库密钥由主密码包裹后存进 `vault.json`
 - Windows Hello 只是本机的快捷解锁：解锁密钥用 DPAPI 绑定当前 Windows 账号，
   换电脑或换 Windows 账号会自动失效，云端永远拿不到这份密钥
+- 验证在后台线程执行，Windows 安全窗口等待期间界面不会「未响应」
 - 删除私密便签会进 `data/vault/trash/`，仍是密文
 - 云端与 GitHub 只上传 `.mdenc` 和去掉 `dpapi_key` 的 `vault.json`；
   没有主密码无法还原内容
@@ -265,7 +329,8 @@ python -m venv .venv
 ```
 HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run
 值名：MemoNest
-值：  "…\pythonw.exe" "…\app.py"
+值（源码运行）：  "…\pythonw.exe" "…\app.py"
+值（exe 运行）：  "…\MemoNest.exe"
 ```
 
 用 `pythonw.exe` 启动，不会弹出终端窗口。可在「任务管理器 → 启动应用」中查看或禁用；

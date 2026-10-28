@@ -8,13 +8,24 @@ from __future__ import annotations
 import copy
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any
 
 APP_NAME = "MemoNest 备忘录"
 APP_VERSION = "1.0.0"
 
-APP_ROOT = Path(__file__).resolve().parent.parent
+FROZEN = bool(getattr(sys, "frozen", False))
+
+if FROZEN:
+    # 打包成 exe 后，配置与数据放在 exe 旁边；只读资源从解包目录读取
+    APP_ROOT = Path(sys.executable).resolve().parent
+    BUNDLE_DIR = Path(getattr(sys, "_MEIPASS", APP_ROOT))
+else:
+    APP_ROOT = Path(__file__).resolve().parent.parent
+    BUNDLE_DIR = APP_ROOT
+
+ICON_PATH = BUNDLE_DIR / "assets" / "icon.ico"
 CONFIG_PATH = APP_ROOT / "config.json"
 
 DATA_DIR = APP_ROOT / "data"

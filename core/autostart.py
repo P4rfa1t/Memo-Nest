@@ -8,7 +8,8 @@ from pathlib import Path
 
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 VALUE_NAME = "MemoNest"
-APP_ROOT = Path(__file__).resolve().parent.parent
+FROZEN = bool(getattr(sys, "frozen", False))
+APP_ROOT = Path(sys.executable).resolve().parent if FROZEN else Path(__file__).resolve().parent.parent
 APP_SCRIPT = APP_ROOT / "app.py"
 
 
@@ -31,6 +32,8 @@ def _pythonw() -> str:
 
 def launch_command() -> str:
     """返回带引号的启动命令，供注册表使用。"""
+    if FROZEN:
+        return f'"{Path(sys.executable).resolve()}"'
     return f'"{_pythonw()}" "{APP_SCRIPT}"'
 
 

@@ -43,18 +43,26 @@ def desktop_dir() -> Path:
 def create_desktop_shortcut(name: str = "MemoNest") -> Path:
     if sys.platform != "win32":
         raise RuntimeError("仅支持 Windows")
-    pythonw = _pythonw()
-    script = cfgmod.APP_ROOT / "app.py"
-    icon = cfgmod.APP_ROOT / "assets" / "icon.ico"
+    frozen = bool(getattr(sys, "frozen", False))
+    if frozen:
+        target_exe = Path(sys.executable).resolve()
+        arguments = ""
+        workdir = target_exe.parent
+        icon = target_exe
+    else:
+        target_exe = _pythonw()
+        arguments = f'"{cfgmod.APP_ROOT / "app.py"}"'
+        workdir = cfgmod.APP_ROOT
+        icon = cfgmod.ICON_PATH
     target = desktop_dir() / f"{name}.lnk"
     target.parent.mkdir(parents=True, exist_ok=True)
 
     command = (
         "$w=New-Object -ComObject WScript.Shell;"
         f"$s=$w.CreateShortcut('{target}');"
-        f"$s.TargetPath='{pythonw}';"
-        f"$s.Arguments='\"{script}\"';"
-        f"$s.WorkingDirectory='{cfgmod.APP_ROOT}';"
+        f"$s.TargetPath='{target_exe}';"
+        f"$s.Arguments='{arguments}';"
+        f"$s.WorkingDirectory='{workdir}';"
         f"$s.IconLocation='{icon}';"
         "$s.Description='MemoNest 便签备忘录';"
         "$s.Save()"

@@ -27,14 +27,14 @@ from core import autostart, backup, hello, onedrive, shortcut, winstyle
 from core import config as cfgmod
 from core.markdown import MarkdownView
 from core.storage import Note, Store, fmt_time
-from core.vault import Vault, VaultStore, VaultError
+from core.vault import Vault, VaultStore
 
 LOG = logging.getLogger("memonest")
 
 
 def apply_icon(window) -> None:
     """给任意 Toplevel 套上同一个便签图标。"""
-    icon = cfgmod.APP_ROOT / "assets" / "icon.ico"
+    icon = cfgmod.ICON_PATH
     if not icon.exists():
         return
     try:
@@ -44,11 +44,24 @@ def apply_icon(window) -> None:
 
 
 def validate_new_password(values: list[str]) -> str | None:
-    """PasswordDialog 校验：主密码长度与二次确认。"""
+    """主密码长度与二次确认。"""
     if len(values[0] or "") < 6:
         return "主密码至少 6 位"
     if values[0] != values[1]:
         return "两次输入的密码不一致"
+    return None
+
+
+def validate_change_password(values: list[str]) -> str | None:
+    """更改主密码：验证当前密码、新密码长度与二次确认。"""
+    if not values[0]:
+        return "请输入当前主密码"
+    if len(values[1] or "") < 6:
+        return "新密码至少 6 位"
+    if values[1] != values[2]:
+        return "两次输入的新密码不一致"
+    if values[0] == values[1]:
+        return "新密码不能与当前密码相同"
     return None
 
 PALETTE = {
@@ -159,16 +172,22 @@ class MemoApp(ctk.CTk):
         self._queue: queue.Queue = queue.Queue()
         self._combo_notes: list[Note] = []
         self._label_map: dict[str, Note] = {}
+        self._vault_panel = None
+        self._vault_intent: tuple | None = None
+        self._vault_mode = "unlock"
+        self._vault_busy = False
+        self._vault_entries: list[ctk.CTkEntry] = []
+        self._menu_cache: dict[str, MenuOverlay] = {}
 
-        self.font_ui = ctk.CTkFont(family=FONT_FAMILY, size=12)
-        self.font_small = ctk.CTkFont(family=FONT_FAMILY, size=11)
-        self.font_tiny = ctk.CTkFont(family=FONT_FAMILY, size=10)
-        self.font_brand = ctk.CTkFont(family=FONT_FAMILY, size=13, weight="bold")
-        self.font_title = ctk.CTkFont(family=FONT_FAMILY, size=19, weight="bold")
-        self.font_mono = ctk.CTkFont(family=MONO_FAMILY, size=11)
+        self.font_ui = ctk.CTkFont(family=FONT_FAMILY, size=13)
+        self.font_small = ctk.CTkFont(family=FONT_FAMILY, size=12)
+        self.font_tiny = ctk.CTkFont(family=FONT_FAMILY, size=11)
+        self.font_brand = ctk.CTkFont(family=FONT_FAMILY, size=14, weight="bold")
+        self.font_title = ctk.CTkFont(family=FONT_FAMILY, size=20, weight="bold")
+        self.font_mono = ctk.CTkFont(family=MONO_FAMILY, size=12)
 
         self.title("MemoNest 便签")
-        self.minsize(360, 470)
+        self.minsize(380, 490)
         self.configure(fg_color=PALETTE["bg"])
         self._set_icon()
 
@@ -195,39 +214,306 @@ class MemoApp(ctk.CTk):
         if note is not None:
             self.load_note(note)
 
+    def _vault_ready(self) -> bool:
+        return self.vault_store is not None
+
     def _ensure_vault_ready(self) -> bool:
-        if self.vault is None and not self._create_vault_flow():
-            return False
-        return self._unlock_vault_flow()
-
-    def _create_vault_flow(self) -> bool:
-        if self.vault is not None:
+        if self._vault_ready():
             return True
-        if not messagebox.askyesno(
-            "私密笔记库",
-            "还没有私密笔记库。\n\n"
-            "创建后，只有你主动移进去的便签才会加密保存；"
-            "普通便签仍然是 Markdown 明文，可以照常搜索和编辑。\n\n"
-            "现在创建吗？",
-            parent=self,
-        ):
-            return False
-        dialog = PasswordDialog(
-            self,
-            "创建私密笔记库",
-            [("主密码", "至少 6 位"), ("确认主密码", "再输入一次")],
-            "创建",
-            "主密码无法找回。Windows Hello 只能在本机加速解锁。",
-            validator=validate_new_password,
+        self.open_vault_panel("unlock")
+        return False
+
+    # ------------------------------------------------------------------
+    # 私密库面板：所有交互都在主窗口内完成
+    # ------------------------------------------------------------------
+    def open_vault_panel(self, mode: str = "unlock", intent: tuple | None = None) -> None:
+        p = PALETTE
+        self._close_vault_panel()
+        if self.vault is None:
+            mode = "create"
+        self._vault_mode = mode
+        self._vault_intent = intent
+        self._vault_busy = False
+
+        panel = ctk.CTkFrame(self, fg_color=p["bg"], corner_radius=0)
+        panel.place(in_=self.body, relx=0, rely=0, relwidth=1, relheight=1)
+        panel.lift()
+        panel.bind("<Escape>", lambda _e: self._cancel_vault_panel())
+        self._vault_panel = panel
+
+        card = ctk.CTkFrame(
+            panel,
+            fg_color=p["card"],
+            corner_radius=18,
+            border_width=1,
+            border_color=p["border"],
         )
-        self.wait_window(dialog)
-        if not dialog.result:
-            return False
-        return self.create_vault(dialog.result[0])
+        card.place(relx=0.5, rely=0.5, anchor="center", relwidth=0.86)
+        inner = ctk.CTkFrame(card, fg_color="transparent", corner_radius=0)
+        inner.pack(fill="both", expand=True, padx=20, pady=18)
 
-    def create_vault(self, password: str) -> bool:
+        titles = {
+            "create": (
+                "🔒  创建私密笔记库",
+                "只有你主动移进来的便签才会加密；其他便签仍然是 Markdown 明文。",
+            ),
+            "unlock": ("🔒  私密笔记库", "输入主密码，或使用 Windows Hello 解锁。"),
+            "password": ("🔒  更改主密码", "更改后，Windows Hello 的快捷解锁会同步更新。"),
+        }
+        title, desc = titles.get(mode, titles["unlock"])
+        ctk.CTkLabel(
+            inner,
+            text=title,
+            font=ctk.CTkFont(family=FONT_FAMILY, size=16, weight="bold"),
+            text_color=p["fg"],
+            anchor="w",
+        ).pack(fill="x")
+        ctk.CTkLabel(
+            inner,
+            text=desc,
+            font=self.font_small,
+            text_color=p["muted"],
+            anchor="w",
+            justify="left",
+            wraplength=320,
+        ).pack(fill="x", pady=(2, 12))
+
+        fields = {
+            "create": [("主密码", "至少 6 位"), ("确认主密码", "再输入一次")],
+            "unlock": [("主密码", "输入主密码")],
+            "password": [
+                ("当前主密码", "验证身份"),
+                ("新主密码", "至少 6 位"),
+                ("确认新主密码", "再输入一次"),
+            ],
+        }[mode]
+
+        self._vault_entries: list[ctk.CTkEntry] = []
+        for name, hint in fields:
+            ctk.CTkLabel(
+                inner,
+                text=name,
+                font=self.font_tiny,
+                text_color=p["muted"],
+                anchor="w",
+            ).pack(fill="x", pady=(0, 2))
+            entry = ctk.CTkEntry(
+                inner,
+                show="•",
+                placeholder_text=hint,
+                height=34,
+                corner_radius=9,
+                border_width=1,
+                border_color=p["border"],
+                fg_color=p["bg"],
+                text_color=p["fg"],
+                font=self.font_small,
+            )
+            entry.pack(fill="x", pady=(0, 8))
+            entry.bind("<Return>", lambda _e: self._vault_primary())
+            self._vault_entries.append(entry)
+
+        self._vault_msg = ctk.CTkLabel(
+            inner,
+            text="",
+            font=self.font_tiny,
+            text_color="#C2503C",
+            anchor="w",
+            justify="left",
+            wraplength=320,
+        )
+        self._vault_msg.pack(fill="x", pady=(0, 4))
+
+        self._vault_primary_btn = ctk.CTkButton(
+            inner,
+            text={"create": "创建并解锁", "unlock": "解锁", "password": "更改密码"}[mode],
+            height=34,
+            corner_radius=9,
+            fg_color=p["accent"],
+            hover_color=p["accent_hover"],
+            text_color="#3B3323",
+            text_color_disabled="#6F5C20",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=13, weight="bold"),
+            command=self._vault_primary,
+        )
+        self._vault_primary_btn.pack(fill="x", pady=(2, 0))
+
+        self._vault_hello_btn = None
+        if mode == "unlock" and self.vault is not None and self.vault.hello_ready():
+            self._vault_hello_btn = ctk.CTkButton(
+                inner,
+                text="使用 Windows Hello 解锁",
+                height=32,
+                corner_radius=9,
+                fg_color=p["strip"],
+                hover_color="#EFE1A6",
+                text_color=p["fg"],
+                font=self.font_small,
+                command=self._vault_hello,
+            )
+            self._vault_hello_btn.pack(fill="x", pady=(8, 0))
+
+        self._vault_cancel_btn = ctk.CTkButton(
+            inner,
+            text="取消",
+            height=26,
+            corner_radius=8,
+            fg_color="transparent",
+            hover_color=p["strip"],
+            text_color=p["muted"],
+            font=self.font_tiny,
+            command=self._cancel_vault_panel,
+        )
+        self._vault_cancel_btn.pack(fill="x", pady=(8, 0))
+
+        self.after(120, self._vault_entries[0].focus_set)
+
+    def _vault_set_busy(self, busy: bool, message: str = "") -> None:
+        self._vault_busy = busy
+        state = "disabled" if busy else "normal"
+        for widget in (
+            getattr(self, "_vault_primary_btn", None),
+            getattr(self, "_vault_hello_btn", None),
+            getattr(self, "_vault_cancel_btn", None),
+        ):
+            if widget is not None:
+                widget.configure(state=state)
+        if getattr(self, "_vault_msg", None) is not None:
+            try:
+                self._vault_msg.configure(
+                    text=message,
+                    text_color=PALETTE["muted"] if busy else "#C2503C",
+                )
+            except tk.TclError:
+                pass
+
+    def _vault_fail(self, message: str) -> None:
+        self._vault_set_busy(False)
+        if getattr(self, "_vault_msg", None) is not None:
+            try:
+                self._vault_msg.configure(text=message, text_color="#C2503C")
+            except tk.TclError:
+                pass
+
+    def _vault_primary(self) -> None:
+        if self._vault_busy:
+            return
+        values = [entry.get() for entry in self._vault_entries]
+        mode = self._vault_mode
+        self._vault_set_busy(True, "正在处理…")
+        self.update_idletasks()
+
+        if mode == "create":
+            error = validate_new_password(values)
+            if error:
+                self._vault_fail(error)
+                return
+            ok, message = self.create_vault(values[0])
+            if not ok:
+                self._vault_fail(message)
+                return
+            self._vault_finish(True)
+            return
+
+        if mode == "unlock":
+            if not values[0]:
+                self._vault_fail("请输入主密码")
+                return
+            try:
+                self.vault.unlock(values[0])
+                self.vault_store = VaultStore(self.vault)
+            except Exception as exc:
+                self._vault_fail(str(exc))
+                return
+            self._vault_finish(True)
+            return
+
+        error = validate_change_password(values)
+        if error:
+            self._vault_fail(error)
+            return
+        try:
+            self.vault.change_password(values[0], values[1])
+        except Exception as exc:
+            self._vault_fail(str(exc))
+            return
+        if self.library != "vault":
+            self.vault_store = None
+            self.vault.lock()
+        self.cfg.set("general.hello_unlock", self.vault.hello_enabled())
+        try:
+            self.cfg.save()
+        except OSError:
+            LOG.exception("保存配置失败")
+        self._vault_finish(True)
+
+    def _vault_hello(self) -> None:
+        if self._vault_busy or self.vault is None:
+            return
+        self._vault_set_busy(True, "请在 Windows 安全窗口中完成验证…")
+        vault = self.vault
+
+        def work() -> None:
+            try:
+                vault.unlock_hello()
+                error = ""
+            except Exception as exc:  # pragma: no cover - 取决于系统
+                error = str(exc)
+            self._post(self._vault_hello_done, error)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _vault_hello_done(self, error: str) -> None:
+        if error:
+            if self._vault_panel is not None:
+                self._vault_fail(error)
+            return
+        try:
+            self.vault_store = VaultStore(self.vault)
+        except Exception as exc:  # pragma: no cover
+            LOG.exception("打开私密笔记库失败")
+            if self._vault_panel is not None:
+                self._vault_fail(f"打开私密笔记库失败：{exc}")
+            return
+        if self._vault_panel is not None:
+            self._vault_finish(True)
+
+    def _vault_finish(self, ok: bool) -> None:
+        intent = self._vault_intent
+        mode = getattr(self, "_vault_mode", "unlock")
+        self._close_vault_panel()
+        if not ok:
+            self.library_tabs.set("私密" if self.library == "vault" else "便签")
+            return
+        if mode == "password":
+            self.set_status("主密码已更新")
+            return
+        if intent and intent[0] == "move":
+            self.move_to_vault()
+            return
+        select_id = intent[1] if intent and intent[0] == "switch" else None
+        self._switch_library("vault", select_id)
+
+    def _cancel_vault_panel(self) -> None:
+        if self._vault_busy:
+            return
+        self._vault_intent = None
+        self._close_vault_panel()
+        self.library_tabs.set("私密" if self.library == "vault" else "便签")
+        self.set_status("就绪")
+
+    def _close_vault_panel(self) -> None:
+        panel = getattr(self, "_vault_panel", None)
+        self._vault_panel = None
+        if panel is not None:
+            try:
+                panel.destroy()
+            except tk.TclError:
+                pass
+
+    def create_vault(self, password: str) -> tuple[bool, str]:
         if self.vault is not None:
-            return True
+            return True, ""
         vault = Vault()
         try:
             vault.create(password)
@@ -236,7 +522,7 @@ class MemoApp(ctk.CTk):
                     vault.enable_hello()
                 except Exception:
                     LOG.exception("启用 Windows Hello 快速解锁失败")
-            self.vault_store = VaultStore(vault)
+            store = VaultStore(vault)
         except Exception as exc:
             LOG.exception("创建私密笔记库失败")
             try:
@@ -245,39 +531,49 @@ class MemoApp(ctk.CTk):
                 shutil.rmtree(vault.root, ignore_errors=True)
             except Exception:
                 pass
-            messagebox.showerror("创建私密笔记库", str(exc), parent=self)
-            return False
+            return False, str(exc)
         self.vault = vault
+        self.vault_store = store
         self.cfg.set("general.hello_unlock", vault.hello_enabled())
         try:
             self.cfg.save()
         except OSError:
             LOG.exception("保存配置失败")
         self._build_menu()
-        self.set_status("私密笔记库已创建")
-        return True
-
-    def _unlock_vault_flow(self) -> bool:
-        if self.vault is None:
-            return False
-        if self.vault_store is not None:
-            return True
-        dialog = UnlockVaultDialog(self, self.vault)
-        self.wait_window(dialog)
-        if not dialog.ok:
-            return False
-        try:
-            self.vault_store = VaultStore(self.vault)
-        except Exception as exc:
-            LOG.exception("打开私密笔记库失败")
-            messagebox.showerror("打开私密笔记库", str(exc), parent=self)
-            return False
-        return True
+        return True, ""
 
     def _on_library_tab(self, value: str) -> None:
         target = "vault" if value == "私密" else "notes"
+        if self._vault_panel is not None and target == "notes":
+            # 面板是覆盖在正文上的，切回「便签」时必须一并收起，
+            # 否则界面看起来没有任何变化。
+            if self._vault_busy:
+                self.library_tabs.set("私密")
+                return
+            self._cancel_vault_panel()
+            if self.library != "notes":
+                self._switch_library("notes")
+            self.library_tabs.set("便签")
+            return
         if not self._switch_library(target):
-            self.library_tabs.set("私密" if self.library == "vault" else "便签")
+            if self._vault_panel is None:
+                self.library_tabs.set("私密" if self.library == "vault" else "便签")
+
+    def _prewarm_menu(self) -> None:
+        """在空闲时预先构建菜单，避免第一次点「⋯」时临时创建控件。"""
+        if self._menu is not None or self._closing:
+            return
+        if self.library in self._menu_cache:
+            return
+        try:
+            overlay = MenuOverlay(self, self._menu_items)
+            self._menu_cache[self.library] = overlay
+            # 先放到窗口外完成一次布局，之后显示时就不用再做冷布局
+            overlay.place(x=-10000, y=-10000)
+            self.update_idletasks()
+            overlay.place_forget()
+        except Exception:
+            LOG.exception("预构建菜单失败")
 
     def _switch_library(self, target: str, select_id: str | None = None) -> bool:
         if target == self.library:
@@ -288,7 +584,9 @@ class MemoApp(ctk.CTk):
             return True
         if target == "vault":
             self.save_current(refresh=False)
-            if not self._ensure_vault_ready():
+            if not self._vault_ready():
+                self.open_vault_panel("unlock", ("switch", select_id))
+                self.library_tabs.set("私密")
                 return False
             self.store = self.vault_store
             self.library = "vault"
@@ -323,10 +621,11 @@ class MemoApp(ctk.CTk):
         if self.library == "vault":
             return
         if self.current is None:
-            messagebox.showinfo("移到私密库", "请先选择一条便签。", parent=self)
+            self.set_status("请先选择一条便签")
             return
         self.save_current(refresh=False)
-        if not self._ensure_vault_ready():
+        if not self._vault_ready():
+            self.open_vault_panel("unlock", ("move",))
             return
         note = self.current
         target = self.vault_store.create(note.title, note.content)
@@ -362,6 +661,7 @@ class MemoApp(ctk.CTk):
     def lock_vault(self) -> None:
         if self.vault is None or self._closing:
             return
+        self._close_vault_panel()
         switched = self.library == "vault"
         if switched:
             try:
@@ -381,6 +681,12 @@ class MemoApp(ctk.CTk):
     # ------------------------------------------------------------------
     def _build_menu(self) -> None:
         """不再使用系统菜单栏，改为顶部「⋯」展开的卡片菜单。"""
+        for overlay in getattr(self, "_menu_cache", {}).values():
+            try:
+                overlay.destroy()
+            except tk.TclError:
+                pass
+        self._menu_cache = {}
         self._topmost_var = tk.BooleanVar(value=bool(self.cfg.get("general.always_on_top")))
         self._menu_items = [
             ("新建便签", "Ctrl+N", self.new_note),
@@ -412,12 +718,18 @@ class MemoApp(ctk.CTk):
         )
         self._menu_items[index + 1:index + 1] = [(None, "", None), *extra]
         self._menu: MenuOverlay | None = None
+        self.after(60, self._prewarm_menu)
 
     def show_menu(self) -> None:
         if self._menu is not None:
             self._menu.close()
             return
-        self._menu = MenuOverlay(self, self._menu_items)
+        overlay = self._menu_cache.get(self.library)
+        if overlay is None:
+            overlay = MenuOverlay(self, self._menu_items)
+            self._menu_cache[self.library] = overlay
+        self._menu = overlay
+        overlay.open()
 
     def _bind_shortcuts(self) -> None:
         self.bind_all("<Control-n>", lambda _e: self._shortcut(self.new_note))
@@ -594,6 +906,7 @@ class MemoApp(ctk.CTk):
 
         body = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
         body.pack(fill="both", expand=True, padx=14, pady=(8, 12))
+        self.body = body
         body.columnconfigure(0, weight=1)
         body.rowconfigure(3, weight=1)
 
@@ -674,7 +987,7 @@ class MemoApp(ctk.CTk):
             text_wrap,
             undo=True,
             maxundo=-1,
-            font=(FONT_FAMILY, 11),
+            font=(FONT_FAMILY, 12),
             tabs=("2c",),
             **text_options,
         )
@@ -768,7 +1081,7 @@ class MemoApp(ctk.CTk):
         if re.fullmatch(r"\d+x\d+[+-]\d+[+-]\d+", geometry):
             self.geometry(geometry)
         else:
-            width, height = 420, 620
+            width, height = 440, 640
             x = max(20, self.winfo_screenwidth() - width - 48)
             self.geometry(f"{width}x{height}+{x}+70")
         if self.cfg.get("general.always_on_top"):
@@ -1311,7 +1624,11 @@ class MemoApp(ctk.CTk):
 
 
 class MenuOverlay(ctk.CTkFrame):
-    """窗口内展开的卡片菜单，紧跟「⋯」按钮，视觉与便签一致。"""
+    """窗口内展开的卡片菜单，紧跟「⋯」按钮，视觉与便签一致。
+
+    菜单第一次打开时构建并缓存，之后只显示 / 隐藏。CustomTkinter 每次新建
+    几十个控件要几百毫秒，缓存后展开基本是即时的。
+    """
 
     def __init__(self, app: "MemoApp", items) -> None:
         p = PALETTE
@@ -1324,41 +1641,49 @@ class MenuOverlay(ctk.CTkFrame):
             width=214,
         )
         self.app = app
-        self._closed = False
+        self._closed = True
+        self._click_bind: str | None = None
+        self._esc_bind: str | None = None
 
         for label, shortcut, command in items:
             if label is None:
-                ctk.CTkFrame(
-                    self, height=1, fg_color=p["border"], corner_radius=0
-                ).pack(fill="x", padx=10, pady=3)
+                tk.Frame(self, height=1, bg=p["border"]).pack(fill="x", padx=10, pady=3)
                 continue
-            row = ctk.CTkFrame(self, fg_color="transparent", corner_radius=8, height=28)
+            row = tk.Frame(self, bg=p["card"], cursor="hand2")
             row.pack(fill="x", padx=5, pady=1)
             row.grid_columnconfigure(0, weight=1)
-            name = ctk.CTkLabel(
+            name = tk.Label(
                 row,
                 text=label,
                 anchor="w",
-                height=28,
                 font=app.font_small,
-                text_color=p["fg"],
+                fg=p["fg"],
+                bg=p["card"],
+                padx=0,
+                pady=2,
+                cursor="hand2",
             )
             name.grid(row=0, column=0, sticky="ew", padx=(9, 4))
-            hint = ctk.CTkLabel(
+            hint = tk.Label(
                 row,
                 text=shortcut,
                 anchor="e",
-                height=28,
                 font=app.font_tiny,
-                text_color=p["muted"],
+                fg=p["muted"],
+                bg=p["card"],
+                padx=0,
+                pady=2,
+                cursor="hand2",
             )
             hint.grid(row=0, column=1, sticky="e", padx=(4, 9))
 
-            def enter(_event=None, widget=row):
-                widget.configure(fg_color=p["strip"])
+            def enter(_event=None, widgets=(row, name, hint)):
+                for widget in widgets:
+                    widget.configure(bg=p["strip"])
 
-            def leave(_event=None, widget=row):
-                widget.configure(fg_color="transparent")
+            def leave(_event=None, widgets=(row, name, hint)):
+                for widget in widgets:
+                    widget.configure(bg=p["card"])
 
             def choose(_event=None, callback=command):
                 self.close()
@@ -1369,10 +1694,12 @@ class MenuOverlay(ctk.CTkFrame):
                 widget.bind("<Leave>", leave)
                 widget.bind("<Button-1>", choose)
 
+    def open(self) -> None:
+        self._closed = False
         self.place(relx=1.0, y=46, x=-12, anchor="ne")
         self.lift()
-        self.app.bind("<Button-1>", self._on_app_click, add="+")
-        self.app.bind("<Escape>", self._on_escape, add="+")
+        self._click_bind = self.app.bind("<Button-1>", self._on_app_click, add="+")
+        self._esc_bind = self.app.bind("<Escape>", self._on_escape, add="+")
 
     def _on_app_click(self, event) -> None:
         widget = event.widget
@@ -1394,9 +1721,22 @@ class MenuOverlay(ctk.CTkFrame):
         if self._closed:
             return
         self._closed = True
-        self.app.unbind("<Button-1>")
-        self.app._menu = None
-        self.destroy()
+        if self._click_bind is not None:
+            try:
+                self.app.unbind("<Button-1>", self._click_bind)
+            except tk.TclError:
+                pass
+            self._click_bind = None
+        if self._esc_bind is not None:
+            try:
+                self.app.unbind("<Escape>", self._esc_bind)
+            except tk.TclError:
+                pass
+            self._esc_bind = None
+        self.place_forget()
+        if self.app._menu is self:
+            self.app._menu = None
+
 
 class SettingsDialog(ctk.CTkToplevel):
     """设置窗口：通用 / OneDrive / GitHub。"""
@@ -1435,7 +1775,7 @@ class SettingsDialog(ctk.CTkToplevel):
         wrapper.pack(fill="both", expand=True, padx=16, pady=14)
 
         ctk.CTkLabel(
-            wrapper, text="设置", font=ctk.CTkFont(family=FONT_FAMILY, size=18, weight="bold"),
+            wrapper, text="设置", font=ctk.CTkFont(family=FONT_FAMILY, size=19, weight="bold"),
             text_color=p["fg"],
         ).pack(anchor="w", pady=(0, 6))
 
@@ -1490,7 +1830,7 @@ class SettingsDialog(ctk.CTkToplevel):
             fg_color=p["accent"],
             hover_color=p["accent_hover"],
             text_color="#3B3323",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=13, weight="bold"),
             command=self._save,
         ).pack(side="right")
         ctk.CTkButton(
@@ -1868,7 +2208,7 @@ class SettingsDialog(ctk.CTkToplevel):
         ctk.CTkLabel(
             frame,
             text="私密笔记库",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=14, weight="bold"),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=15, weight="bold"),
             text_color=p["fg"],
             anchor="w",
         ).grid(row=0, column=0, columnspan=2, sticky="w", padx=(4, 4), pady=(8, 2))
@@ -1901,7 +2241,7 @@ class SettingsDialog(ctk.CTkToplevel):
                 fg_color=p["accent"],
                 hover_color=p["accent_hover"],
                 text_color="#3B3323",
-                font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
+                font=ctk.CTkFont(family=FONT_FAMILY, size=13, weight="bold"),
                 command=self._create_vault,
             ).grid(row=3, column=0, columnspan=2, sticky="w", padx=(4, 4), pady=(2, 8))
             ctk.CTkLabel(
@@ -2005,47 +2345,30 @@ class SettingsDialog(ctk.CTkToplevel):
 
     def _create_vault(self) -> None:
         if self.app.vault is not None:
-            messagebox.showinfo("私密笔记库", "私密笔记库已经创建。", parent=self)
+            self.destroy()
+            self.app.open_vault_panel("unlock")
             return
-        values = self._ask_password(
-            "创建私密笔记库",
-            [("主密码", "至少 6 位"), ("确认主密码", "再输入一次")],
-            "创建",
-            "主密码无法找回。Windows Hello 只能在本机加速解锁。",
-            validator=self._validate_new_password,
-        )
-        if not values:
-            return
-        if not self.app.create_vault(values[0]):
-            return
-        messagebox.showinfo(
-            "私密笔记库",
-            "已创建。\n\n在顶栏切到「私密」即可打开；"
-            "编辑普通便签时，也可以从菜单选「移到私密笔记库」。",
-            parent=self,
-        )
-        self._refresh_vault_tab()
+        self.destroy()
+        self.app.open_vault_panel("create")
 
     def _toggle_hello(self) -> None:
         vault = self.app.vault
         if vault is None:
             return
         want = bool(self.hello_var.get())
+        if want and not self.app._vault_ready():
+            self.hello_var.set(False)
+            self.app.set_status("请先解锁私密笔记库，再开启 Windows Hello")
+            return
         try:
             if want:
-                if not self.app._unlock_vault_flow():
-                    raise VaultError("请先解锁私密笔记库")
                 vault.enable_hello()
             else:
                 vault.disable_hello()
         except Exception as exc:
             self.hello_var.set(not want)
-            messagebox.showwarning("Windows Hello", str(exc), parent=self)
+            self.app.set_status(f"Windows Hello：{exc}")
             return
-        try:
-            self.grab_set()
-        except Exception:
-            pass
         self.cfg.set("general.hello_unlock", want)
         try:
             self.cfg.save()
@@ -2054,61 +2377,14 @@ class SettingsDialog(ctk.CTkToplevel):
         self._refresh_vault_tab()
 
     def _change_password(self) -> None:
-        values = self._ask_password(
-            "更改主密码",
-            [("当前主密码", "验证身份"), ("新主密码", "至少 6 位"), ("确认新主密码", "再输入一次")],
-            "更改",
-            "更改后，Windows Hello 的快捷解锁会同步更新。",
-            validator=self._validate_change_password,
-        )
-        if not values:
+        if self.app.vault is None:
             return
-        try:
-            self.app.vault.change_password(values[0], values[1])
-        except Exception as exc:
-            messagebox.showerror("更改失败", str(exc), parent=self)
-            return
-        if self.app.library != "vault":
-            self.app.vault_store = None
-            self.app.vault.lock()
-        messagebox.showinfo("主密码", "主密码已更新。", parent=self)
-        self._refresh_vault_tab()
+        self.destroy()
+        self.app.open_vault_panel("password")
 
     def _lock_now(self) -> None:
         self.destroy()
         self.app.lock_vault()
-
-    @staticmethod
-    def _validate_new_password(values: list[str]) -> str | None:
-        return validate_new_password(values)
-
-    @staticmethod
-    def _validate_change_password(values: list[str]) -> str | None:
-        if not values[0]:
-            return "请输入当前主密码"
-        if len(values[1] or "") < 6:
-            return "新密码至少 6 位"
-        if values[1] != values[2]:
-            return "两次输入的新密码不一致"
-        if values[0] == values[1]:
-            return "新密码不能与当前密码相同"
-        return None
-
-    def _ask_password(
-        self,
-        title: str,
-        fields: list[tuple[str, str]],
-        ok_text: str = "确定",
-        hint: str = "",
-        validator=None,
-    ) -> list[str] | None:
-        dialog = PasswordDialog(self.app, title, fields, ok_text, hint, validator)
-        self.app.wait_window(dialog)
-        try:
-            self.grab_set()
-        except Exception:
-            pass
-        return dialog.result
 
     def _create_shortcut(self) -> None:
         try:
@@ -2334,142 +2610,6 @@ class SettingsDialog(ctk.CTkToplevel):
             messagebox.showerror("打开失败", str(exc), parent=self)
 
 
-class PasswordDialog(ctk.CTkToplevel):
-    """模态口令输入框：用于设置 / 更改主密码。"""
-
-    def __init__(
-        self,
-        app: MemoApp,
-        title: str,
-        fields: list[tuple[str, str]],
-        ok_text: str = "确定",
-        hint: str = "",
-        validator=None,
-    ) -> None:
-        super().__init__(app)
-        self.app = app
-        self.result: list[str] | None = None
-        self._validator = validator
-        self._entries: list[ctk.CTkEntry] = []
-        p = PALETTE
-        self.title(title)
-        self.geometry(f"390x{188 + 60 * len(fields)}")
-        self.resizable(False, False)
-        self.configure(fg_color=p["bg"])
-        self.transient(app)
-        apply_icon(self)
-        self.protocol("WM_DELETE_WINDOW", self._cancel)
-        self.bind("<Escape>", lambda _e: self._cancel())
-
-        wrap = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
-        wrap.pack(fill="both", expand=True, padx=20, pady=16)
-
-        ctk.CTkLabel(
-            wrap,
-            text=title,
-            font=ctk.CTkFont(family=FONT_FAMILY, size=14, weight="bold"),
-            text_color=p["fg"],
-            anchor="w",
-        ).pack(anchor="w")
-        if hint:
-            ctk.CTkLabel(
-                wrap,
-                text=hint,
-                font=self.app.font_tiny,
-                text_color=p["muted"],
-                anchor="w",
-                justify="left",
-                wraplength=340,
-            ).pack(anchor="w", pady=(4, 6))
-
-        for label, placeholder in fields:
-            ctk.CTkLabel(
-                wrap, text=label, font=self.app.font_tiny, text_color=p["muted"], anchor="w"
-            ).pack(anchor="w", pady=(7, 2))
-            entry = ctk.CTkEntry(
-                wrap,
-                show="•",
-                placeholder_text=placeholder,
-                height=32,
-                corner_radius=8,
-                border_width=1,
-                border_color=p["border"],
-                fg_color=p["card"],
-                text_color=p["fg"],
-                placeholder_text_color=p["muted"],
-                font=self.app.font_small,
-            )
-            entry.pack(fill="x")
-            entry.bind("<Return>", lambda _e: self._ok())
-            self._entries.append(entry)
-
-        self.error = ctk.CTkLabel(
-            wrap, text="", font=self.app.font_tiny, text_color="#C2503C", anchor="w",
-            justify="left", wraplength=340,
-        )
-        self.error.pack(anchor="w", pady=(6, 0))
-
-        buttons = ctk.CTkFrame(wrap, fg_color="transparent", corner_radius=0)
-        buttons.pack(fill="x", side="bottom", pady=(10, 0))
-        ctk.CTkButton(
-            buttons,
-            text=ok_text,
-            width=96,
-            height=34,
-            corner_radius=9,
-            fg_color=p["accent"],
-            hover_color=p["accent_hover"],
-            text_color="#3B3323",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
-            command=self._ok,
-        ).pack(side="right")
-        ctk.CTkButton(
-            buttons,
-            text="取消",
-            width=76,
-            height=34,
-            corner_radius=9,
-            fg_color="transparent",
-            hover_color=p["strip"],
-            text_color=p["fg"],
-            border_width=1,
-            border_color=p["border"],
-            command=self._cancel,
-        ).pack(side="right", padx=(0, 8))
-
-        self.after(120, self._style)
-        self.grab_set()
-        if self._entries:
-            self.after(90, self._entries[0].focus_set)
-
-    def _style(self) -> None:
-        winstyle.apply(self, PALETTE["bg"], PALETTE["fg"], PALETTE["border"])
-
-    def _ok(self) -> None:
-        values = [entry.get() for entry in self._entries]
-        if not all(values):
-            self.error.configure(text="请填写所有字段")
-            return
-        if self._validator is not None:
-            message = self._validator(values)
-            if message:
-                self.error.configure(text=message)
-                return
-        self.result = values
-        self._close()
-
-    def _cancel(self) -> None:
-        self.result = None
-        self._close()
-
-    def _close(self) -> None:
-        try:
-            self.grab_release()
-        except tk.TclError:
-            pass
-        self.destroy()
-
-
 class DeviceCodeDialog(ctk.CTkToplevel):
     """显示 Microsoft 设备代码，等待浏览器授权。"""
 
@@ -2494,7 +2634,7 @@ class DeviceCodeDialog(ctk.CTkToplevel):
         ctk.CTkLabel(
             wrap,
             text="登录 Microsoft 账号",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=14, weight="bold"),
+            font=ctk.CTkFont(family=FONT_FAMILY, size=15, weight="bold"),
             text_color=p["fg"],
             anchor="w",
         ).pack(anchor="w")
@@ -2606,158 +2746,33 @@ class DeviceCodeDialog(ctk.CTkToplevel):
         self.destroy()
 
 
-class UnlockVaultDialog(ctk.CTkToplevel):
-    """解锁私密笔记库：主密码，或 Windows Hello 快捷解锁。"""
+def enable_dpi_awareness() -> None:
+    """声明 per-monitor v2 DPI 感知。
 
-    def __init__(self, app: MemoApp, vault: Vault) -> None:
-        super().__init__(app)
-        self.app = app
-        self.vault = vault
-        self.ok = False
-        self._closed = False
-        p = PALETTE
-        self.title("解锁私密笔记库")
-        self.geometry("400x340")
-        self.resizable(False, False)
-        self.configure(fg_color=p["bg"])
-        self.transient(app)
-        apply_icon(self)
-        self.protocol("WM_DELETE_WINDOW", self._cancel)
-        self.bind("<Escape>", lambda _e: self._cancel())
+    CustomTkinter 默认只做 SetProcessDpiAwareness(2)，非客户区（标题栏）在
+    多显示器切换缩放比例时不会重新缩放。这里优先使用 v2 上下文，
+    失败时保持 CustomTkinter 的默认行为。
+    """
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
 
-        wrap = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
-        wrap.pack(fill="both", expand=True, padx=22, pady=20)
-        ctk.CTkLabel(
-            wrap,
-            text="🔒  私密笔记库",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=15, weight="bold"),
-            text_color=p["fg"],
-            anchor="w",
-        ).pack(anchor="w")
-        ctk.CTkLabel(
-            wrap,
-            text="输入主密码，或使用 Windows Hello 解锁。",
-            font=self.app.font_small,
-            text_color=p["muted"],
-            anchor="w",
-            justify="left",
-            wraplength=340,
-        ).pack(anchor="w", pady=(2, 12))
-
-        self.password = tk.StringVar()
-        self.entry = ctk.CTkEntry(
-            wrap,
-            textvariable=self.password,
-            show="•",
-            placeholder_text="主密码",
-            height=36,
-            corner_radius=10,
-            border_width=1,
-            border_color=p["border"],
-            fg_color=p["card"],
-            text_color=p["fg"],
-            font=self.app.font_small,
-        )
-        self.entry.pack(fill="x")
-        self.entry.bind("<Return>", lambda _e: self._unlock())
-
-        self.error = ctk.CTkLabel(
-            wrap,
-            text="",
-            font=self.app.font_tiny,
-            text_color="#C2503C",
-            anchor="w",
-            justify="left",
-            wraplength=340,
-        )
-        self.error.pack(anchor="w", pady=(6, 2))
-
-        ctk.CTkButton(
-            wrap,
-            text="解锁",
-            height=35,
-            corner_radius=10,
-            fg_color=p["accent"],
-            hover_color=p["accent_hover"],
-            text_color="#3B3323",
-            font=ctk.CTkFont(family=FONT_FAMILY, size=12, weight="bold"),
-            command=self._unlock,
-        ).pack(fill="x", pady=(4, 0))
-
-        if vault.hello_ready():
-            ctk.CTkButton(
-                wrap,
-                text="使用 Windows Hello 解锁",
-                height=32,
-                corner_radius=10,
-                fg_color=p["strip"],
-                hover_color="#EFE1A6",
-                text_color=p["fg"],
-                font=self.app.font_small,
-                command=self._hello,
-            ).pack(fill="x", pady=(8, 0))
-
-        ctk.CTkButton(
-            wrap,
-            text="取消",
-            height=26,
-            corner_radius=8,
-            fg_color="transparent",
-            hover_color=p["strip"],
-            text_color=p["muted"],
-            font=self.app.font_tiny,
-            command=self._cancel,
-        ).pack(fill="x", side="bottom", pady=(8, 0))
-
-        self.after(120, self._style)
-        self.after(90, self.entry.focus_set)
-        self.grab_set()
-
-    def _style(self) -> None:
-        winstyle.apply(self, PALETTE["bg"], PALETTE["fg"], PALETTE["border"])
-
-    def _unlock(self) -> None:
-        password = self.password.get()
-        if not password:
-            self.error.configure(text="请输入主密码")
+        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == -4
+        if ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
             return
-        self.error.configure(text="")
-        self.update_idletasks()
-        try:
-            self.vault.unlock(password)
-        except Exception as exc:
-            self.error.configure(text=str(exc))
-            return
-        self.ok = True
-        self._close()
+    except Exception:
+        LOG.debug("SetProcessDpiAwarenessContext 不可用", exc_info=True)
+    try:
+        import ctypes
 
-    def _hello(self) -> None:
-        self.error.configure(text="请在 Windows 安全窗口中完成验证…")
-        self.update_idletasks()
-        try:
-            self.vault.unlock_hello()
-        except Exception as exc:
-            self.error.configure(text=str(exc))
-            return
-        self.ok = True
-        self._close()
-
-    def _cancel(self) -> None:
-        self.ok = False
-        self._close()
-
-    def _close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
-        try:
-            self.grab_release()
-        except tk.TclError:
-            pass
-        self.destroy()
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        LOG.debug("SetProcessDpiAwareness 不可用", exc_info=True)
 
 
 def main() -> None:
+    enable_dpi_awareness()
     setup_logging()
     cfgmod.ensure_dirs()
     LOG.info("启动 %s v%s", cfgmod.APP_NAME, cfgmod.APP_VERSION)

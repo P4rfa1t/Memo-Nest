@@ -13,6 +13,7 @@ venv/
 build/
 dist/
 *.spec
+!MemoNest.spec
 
 # 系统
 Thumbs.db
