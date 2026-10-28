@@ -1139,10 +1139,16 @@ class SettingsDialog(ctk.CTkToplevel):
         self._build()
         self.grab_set()
         self.bind("<Escape>", lambda _e: self._cancel())
+        self.bind("<Map>", self._on_map, add="+")
         self.protocol("WM_DELETE_WINDOW", self._cancel)
         self.after(150, self._style_frame)
-        self.after(600, self._style_frame)
+        self.after(700, self._style_frame)
+        self.after(1500, self._style_frame)
         self.focus_set()
+
+    def _on_map(self, event=None) -> None:
+        if event is None or event.widget is self:
+            self.after(60, self._style_frame)
 
     def _style_frame(self) -> None:
         winstyle.apply(self, PALETTE["bg"], PALETTE["fg"], PALETTE["border"])
