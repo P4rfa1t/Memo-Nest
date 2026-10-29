@@ -162,8 +162,8 @@ powershell -ExecutionPolicy Bypass -File .\installer\build_installer.ps1 -Build
 - 推送 `v*` 标签时额外创建 Release 并附上安装包：
 
 ```powershell
-git tag v1.3.0
-git push origin v1.3.0
+git tag v1.3.1
+git push origin v1.3.1
 ```
 
 ## 界面

@@ -175,6 +175,12 @@ EnableWindow = user32.EnableWindow
 EnableWindow.restype = wintypes.BOOL
 EnableWindow.argtypes = [HWND, wintypes.BOOL]
 
+ShowWindow = user32.ShowWindow
+ShowWindow.restype = wintypes.BOOL
+ShowWindow.argtypes = [HWND, ctypes.c_int]
+SW_HIDE = 0
+SW_SHOW = 5
+
 HWND_TOP = 0
 GW_HWNDPREV = 3
 SWP_NOSIZE = 0x0001
@@ -461,6 +467,7 @@ class RichEdit(tk.Frame):
         self._create_font_handle()
         self._apply_format()
         self.set_text(text)
+        self._hidden = False
 
         self._wndproc_ref = CachedWndProc(self._wndproc)
         self._old_proc = SetWindowLongPtrW(
@@ -733,7 +740,7 @@ class RichEdit(tk.Frame):
         )
 
     def _raise_to_top(self) -> None:
-        if not self._hwnd:
+        if not self._hwnd or self._hidden:
             return
         SetWindowPos(
             self._hwnd,
@@ -1029,6 +1036,21 @@ class RichEdit(tk.Frame):
             EnableWindow(self._hwnd, bool(enabled))
         except Exception:
             LOG.exception("切换 RichEdit 可用状态失败")
+
+    def set_visible(self, visible: bool) -> None:
+        """面板盖住正文时把原生窗口整个藏起来。
+
+        原生 HWND 的 z 序由 Win32 管理，Tk 的 lift()/lower() 改不动它：
+        面板 lift() 到最上层，正文照样画在面板之上，视觉上就是
+        「设置/私密库跑到了主页面下方」。只有 ShowWindow 能真正解决。
+        """
+        if not self._hwnd:
+            return
+        self._hidden = not visible
+        try:
+            ShowWindow(self._hwnd, SW_SHOW if visible else SW_HIDE)
+        except Exception:
+            LOG.exception("切换 RichEdit 可见状态失败")
 
     def input_enabled(self) -> bool:
         if not self._hwnd:

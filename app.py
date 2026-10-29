@@ -283,8 +283,11 @@ class MemoApp(ctk.CTk):
             self._vault_cache = None
 
         p = PALETTE
-        panel = ctk.CTkFrame(self, fg_color=p["bg"], corner_radius=0)
-        panel.place(in_=self.body, relx=0, rely=0, relwidth=1, relheight=1)
+        # 父级必须是 body，不能用 self（root）。lower() 只在同级窗口之间调序；
+        # 若面板挂在 root 下，lower() 会把它压到 body 之下——正文反而盖住面板，
+        # 于是出现「私密库/设置跑到主页面下方」的错位。挂 body 就和回收站一致了。
+        panel = ctk.CTkFrame(self.body, fg_color=p["bg"], corner_radius=0)
+        panel.place(relx=0, rely=0, relwidth=1, relheight=1)
         panel.lower()
         panel.bind("<Escape>", lambda _e: self._cancel_vault_panel())
 
@@ -958,6 +961,15 @@ class MemoApp(ctk.CTk):
             widgets = list(getattr(self, "_native_inputs", ()))
             for widget in widgets:
                 widget.set_input_enabled(not blocked)
+                # 只禁用不够：原生 HWND 的 z 序由 Win32 管，Tk 的 lift() 压不住它，
+                # 面板升到最上层后正文依然画在面板之上（表现为面板「跑到页面下方」）。
+                # 面板显示期间把原生窗口整个藏掉，关闭后恢复。
+                hide = getattr(widget, "set_visible", None)
+                if hide is not None:
+                    try:
+                        hide(not blocked)
+                    except Exception:
+                        LOG.exception("切换原生控件可见性失败")
             if blocked:
                 # 控件被禁用后键盘焦点悬空，把它交给 Tk 顶层，
                 # 这样面板自己的 Esc 绑定才能收到按键。
@@ -2885,9 +2897,9 @@ class TrashPanel(ctk.CTkFrame):
         self._esc_bind: str | None = None
         self._reload_sig = None
 
-        self.place(in_=app.body, relx=0, rely=0, relwidth=1, relheight=1)
+        self.place(relx=0, rely=0, relwidth=1, relheight=1)
         if prewarm:
-            # 预热：先压到 body 之下，用户看不见；真正打开时再 lift()
+            # 预热：先压到 body 的最底层，用户看不见；真正打开时再 lift()
             self.lower()
         else:
             self.lift()
@@ -3125,7 +3137,9 @@ class SettingsPanel(ctk.CTkFrame):
     """设置面板：覆盖在主窗口内，不再打开独立窗口。"""
 
     def __init__(self, app: MemoApp, prewarm: bool = False) -> None:
-        super().__init__(app, fg_color=PALETTE["bg"], corner_radius=0)
+        # 父级用 app.body 而不是 app：面板挂在 root 下时 lower() 会降到 body 之下，
+        # 正文会盖住面板（表现为设置内容跑到主页面下方）。挂 body 与回收站一致。
+        super().__init__(app.body, fg_color=PALETTE["bg"], corner_radius=0)
         self.app = app
         self.cfg = app.cfg
         self.vars: dict[str, tk.Variable] = {}
@@ -3136,7 +3150,7 @@ class SettingsPanel(ctk.CTkFrame):
         self._tab_job = None
         self._prewarm = prewarm
 
-        self.place(in_=app, relx=0, rely=0, relwidth=1, relheight=1)
+        self.place(relx=0, rely=0, relwidth=1, relheight=1)
         if prewarm:
             # 预热时压到最底层：面板一直挂着，但用户看不见也点不到。
             # 打开时只 lift()，省掉整棵子树的重新布局。
