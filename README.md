@@ -6,7 +6,7 @@
 
 界面使用 [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter) 绘制，
 圆角卡片 + 与纸面同色的标题栏，运行时内存约 40–60 MB，不需要 Electron 或 Qt。
-可以直接下载打包好的单文件 `MemoNest.exe`，也可以用源码运行。
+可以直接下载打包好的安装包，也可以用源码运行。
 
 ![MemoNest 便签](docs/screenshot.png)
 
@@ -67,7 +67,7 @@
 - **GitHub 同步**：把笔记以 Markdown 文件提交并推送到你的仓库，私密便签只上传密文
 - **备份策略**：手动、定时（分钟）、退出前自动备份
 - **开机自启**：写入当前用户注册表 `Run` 项，可在设置中开关
-- **单文件 exe**：PyInstaller onefile 打包，双击即用；GitHub Actions 自动编译并发布 Release
+- **安装版**：PyInstaller onedir + Inno Setup，开始菜单 / 桌面快捷方式、卸载程序；GitHub Actions 自动编译并发布 Release
 - **本地优先**：普通便签就是 `data/notes/*.md`，任何编辑器都能打开
 
 ## 环境要求
@@ -100,41 +100,65 @@ python -m venv .venv
 首次启动会自动创建 `data/notes/` 和一篇欢迎便签。私密笔记库不会自动出现，
 只有在「设置 → 私密库」里主动创建后才会生成 `data/vault/`。
 
-## 直接使用单文件 exe
+## 下载与安装
 
 不想装 Python？从 [Releases](https://github.com/P4rfa1t/Memo-Nest/releases)
-下载 `MemoNest.exe`，放到任意目录双击即可。`main` 分支的 Actions 构建产物
+下载 `MemoNest-Setup-x.y.z.exe`，双击安装即可。`main` 分支的 Actions 构建产物
 在对应 workflow 运行的 **Artifacts** 里也能下载。
 
-![单文件 exe](docs/screenshot-exe.png)
-
-- 首次启动在 exe 旁边创建 `data/` 和 `config.json`，**不写系统目录**
-- 迁移或备份 = 把 `MemoNest.exe`、`data/`、`config.json` 一起搬走
-- 用 exe 运行时，开机自启与桌面快捷方式会指向 exe 本身
+- **按用户安装**，默认目录 `%LOCALAPPDATA%\Programs\MemoNest`，不需要管理员权限
+- 自动创建开始菜单项，可选桌面快捷方式，并注册卸载程序
+- 程序目录固定，安装时不能改到 `Program Files`——因为便签数据就写在 exe 旁边
+- 首次启动在安装目录创建 `data/` 和 `config.json`，**不写系统目录**
+- 卸载只删除程序文件，默认保留 `data/` 与 `config.json`；确认不再需要后可手动删除
+  整个安装目录
+- 开机自启写入的 `HKCU\...\Run\MemoNest` 会在卸载时自动清理
 - 程序未做代码签名，SmartScreen 可能提示「未知发布者」，
   点「更多信息 → 仍要运行」即可
 
+### 从旧版单文件 exe 迁移
+
+旧版是把 `MemoNest.exe`、`data/`、`config.json` 放在同一个文件夹里。换成安装版时：
+
+1. 关闭旧版程序
+2. 安装 `MemoNest-Setup-x.y.z.exe`
+3. 把旧文件夹里的 `data/` 和 `config.json` 复制到
+   `%LOCALAPPDATA%\Programs\MemoNest\`
+4. 启动新版本，便签、私密库和设置都会保留
+
 ## 自行打包与 GitHub Actions
 
-打包配置在 `MemoNest.spec`（onefile、`console=False`、收集 customtkinter 与 winrt）：
+打包分为两步：PyInstaller 生成目录版程序，再用 Inno Setup 生成安装包。
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install pyinstaller
-.\.venv\Scripts\python.exe -m PyInstaller MemoNest.spec --noconfirm --clean
+# 1. 安装依赖
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt pyinstaller
+winget install --id JRSoftware.InnoSetup -e
+
+# 2. 打包目录版 + 安装包（一步完成）
+powershell -ExecutionPolicy Bypass -File .\installer\build_installer.ps1 -Build
 ```
 
-产物是 `dist/MemoNest.exe`，单文件约 19 MB，双击不弹控制台。frozen 模式下
-程序把数据写在 exe 所在目录，图标等只读资源从 PyInstaller 的临时解包目录读取。
+产物：
+
+- `dist/MemoNest/MemoNest.exe` + `dist/MemoNest/_internal/`：目录版程序，约 60 MB
+- `dist/installer/MemoNest-Setup-x.y.z.exe`：安装包
+- 版本号来自 `core/config.py` 的 `APP_VERSION`
+
+打包配置在 `MemoNest.spec`（onedir、`console=False`、收集 customtkinter 与 winrt）。
+安装器脚本在 `installer/MemoNest.iss`，中文语言文件是 `installer/ChineseSimplified.isl`。
+`build_installer.ps1` 会自动查找 `ISCC.exe`（也支持通过 `ISCC_PATH` 指定），并检查
+`dist/MemoNest/` 里没有混入开发机上的 `data/` 或 `config.json`。
 
 `.github/workflows/build.yml` 已配置自动编译（`windows-latest` + Python 3.12）：
 
 - push 到 `main`、提交 PR，或在 Actions 页面手动 `Run workflow`：
-  跑单元测试 → 打包 → 上传 Artifacts
-- 推送 `v*` 标签时额外创建 Release 并附上 exe：
+  跑单元测试 → 打包目录版 → 生成安装包 → 上传 Artifacts
+- 推送 `v*` 标签时额外创建 Release 并附上安装包：
 
 ```powershell
-git tag v1.0.0
-git push origin v1.0.0
+git tag v1.1.0
+git push origin v1.1.0
 ```
 
 ## 界面
@@ -190,7 +214,7 @@ git push origin v1.0.0
 备忘录/
 ├─ app.py                 主界面（CustomTkinter）
 ├─ MemoNest.pyw           无控制台启动入口
-├─ MemoNest.spec          PyInstaller 单文件打包配置
+├─ MemoNest.spec          PyInstaller 目录版打包配置
 ├─ core/
 │  ├─ config.py           配置、路径、OneDrive 检测
 │  ├─ storage.py          普通笔记读写、索引、搜索
@@ -207,6 +231,10 @@ git push origin v1.0.0
 ├─ assets/icon.ico        应用图标
 ├─ docs/                  截图
 ├─ tools/make_icon.py     图标生成脚本（纯标准库）
+├─ installer/
+│  ├─ MemoNest.iss        Inno Setup 安装包脚本
+│  ├─ build_installer.ps1 一键打包目录版与安装包
+│  └─ ChineseSimplified.isl  安装器简体中文语言文件
 ├─ .github/workflows/build.yml  GitHub Actions：测试 + 打包 + Release
 ├─ data/                  运行后生成（已 gitignore）
 │  ├─ notes/              普通便签，每篇一个 .md 文件
@@ -226,8 +254,10 @@ git push origin v1.0.0
 └─ tests/                 单元测试（test_core.py / test_vault.py）
 ```
 
-> 用 `dist/MemoNest.exe` 运行时，`data/` 与 `config.json` 生成在 exe 所在目录，
-> 而不是项目目录。
+> 用 `dist/MemoNest/MemoNest.exe` 运行时，`data/` 与 `config.json` 生成在 exe 所在目录，
+> 而不是项目目录。安装版对应的位置是
+> `%LOCALAPPDATA%\Programs\MemoNest\data\` 与
+> `%LOCALAPPDATA%\Programs\MemoNest\config.json`。
 
 ## OneDrive 云备份
 
@@ -361,7 +391,7 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run
 ```
 
 用 `pythonw.exe` 启动，不会弹出终端窗口。可在「任务管理器 → 启动应用」中查看或禁用；
-取消勾选会删除该项。
+取消勾选会删除该项。安装版卸载时，安装器也会清理这个 `MemoNest` 值。
 
 ## 测试
 
@@ -369,7 +399,7 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run
 .\.venv\Scripts\python.exe -m unittest discover -s tests -v
 ```
 
-共 32 项，覆盖笔记 CRUD、搜索、回收站列出与恢复、孤立 md 导入、Markdown 解析、
+共 33 项，覆盖笔记 CRUD、搜索、回收站列出与恢复、孤立 md 导入、Markdown 解析、
 zip 备份、OneDrive 镜像、GitHub 推送（本地 bare 仓库），以及私密库的
 加密往返、错误密码、改密、加密回收站（含恢复）、双库备份与 `dpapi_key` 剥离。
 
