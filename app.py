@@ -2297,7 +2297,12 @@ class TrashPanel(ctk.CTkFrame):
         if note is None:
             self.app.show_error("回收站", "这条便签已经无法读取，可能文件已被移走。")
             return
-        self.app.refresh_list()
+        same_library = (entry.source == "vault") == (self.app.library == "vault")
+        if same_library:
+            self.app.refresh_list(select=note.id)
+            self.app.load_note(note)
+        else:
+            self.app.refresh_list()
         self.app.set_status(f"已从回收站恢复《{note.title}》")
         self.reload()
 
