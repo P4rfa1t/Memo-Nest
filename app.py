@@ -2301,7 +2301,9 @@ class ContextMenu:
                 smooth=False,
                 fill="",
                 outline="",
-                tags=("hl", str(index)),
+                # tag 不能直接用 str(index)：Tk canvas 的 item id 也是整数，
+                # itemconfigure("5") 会先按 id 命中第 5 个 item 而不是这一行。
+                tags=("hl", self._tag(index)),
             )
             self._rows.append((cursor_y, cursor_y + self._ROW_H, index))
             cursor_y += self._ROW_H
@@ -2367,6 +2369,11 @@ class ContextMenu:
                 return index
         return -1
 
+    @staticmethod
+    def _tag(index: int) -> str:
+        """高亮多边形的 tag，带前缀避免和 Tk 的数字 item id 撞车。"""
+        return f"row{index}"
+
     def _paint(self, index: int) -> None:
         if self._canvas is None or index == self._hover:
             return
@@ -2377,7 +2384,7 @@ class ContextMenu:
                 continue
             enabled = self._items[target][2] is not None
             self._canvas.itemconfigure(
-                str(target),
+                self._tag(target),
                 fill=PALETTE["strip"] if target == index and enabled else "",
             )
 
