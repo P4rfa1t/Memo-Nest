@@ -9,6 +9,7 @@ import os
 import queue
 import re
 import threading
+import time
 import tkinter as tk
 import webbrowser
 from datetime import datetime
@@ -177,6 +178,7 @@ class MemoApp(ctk.CTk):
         self._combo_notes: list[Note] = []
         self._label_map: dict[str, Note] = {}
         self._vault_panel = None
+        self._vault_cache = None
         self._vault_intent: tuple | None = None
         self._vault_mode = "unlock"
         self._vault_busy = False
@@ -186,8 +188,11 @@ class MemoApp(ctk.CTk):
         self._settings_panel = None
         self._settings_cache = None
         self._trash_panel = None
+        self._trash_cache = None
+        self._prewarm_job = None
         self._modal_depth = 0
         self._modal_top = None
+        self._last_input = time.monotonic()
 
         self.font_ui = ctk.CTkFont(family=FONT_FAMILY, size=13)
         self.font_small = ctk.CTkFont(family=FONT_FAMILY, size=12)
@@ -213,6 +218,7 @@ class MemoApp(ctk.CTk):
         self._schedule_auto_backup()
         self._poll_queue()
         self.set_status("就绪")
+        self._schedule_prewarm()
 
     # ------------------------------------------------------------------
     # 便签库 / 私密库
@@ -237,7 +243,6 @@ class MemoApp(ctk.CTk):
     # 私密库面板：所有交互都在主窗口内完成
     # ------------------------------------------------------------------
     def open_vault_panel(self, mode: str = "unlock", intent: tuple | None = None) -> None:
-        p = PALETTE
         self._close_vault_panel()
         if self.vault is None:
             mode = "create"
@@ -245,12 +250,43 @@ class MemoApp(ctk.CTk):
         self._vault_intent = intent
         self._vault_busy = False
 
+        panel = self._ensure_vault_panel()
+        self._fill_vault_panel(mode)
+        self._vault_panel = panel
+        panel.lift()
+        self._apply_native_guard()
+        if self._vault_entries:
+            self.after(120, self._focus_vault_entry)
+
+    def _focus_vault_entry(self) -> None:
+        """延后聚焦；期间面板可能已被关闭/销毁，这里兜住 TclError。"""
+        panel = getattr(self, "_vault_panel", None)
+        if panel is None or not self._vault_entries:
+            return
+        try:
+            if not panel.winfo_exists():
+                return
+            self._vault_entries[0].focus_set()
+        except tk.TclError:
+            pass
+
+    def _ensure_vault_panel(self):
+        """私密库面板只建一次：CustomTkinter 每个控件要 20ms 以上，
+        每次重新构建会让解锁窗口明显卡一下。"""
+        panel = getattr(self, "_vault_cache", None)
+        if panel is not None:
+            try:
+                if panel.winfo_exists():
+                    return panel
+            except tk.TclError:
+                pass
+            self._vault_cache = None
+
+        p = PALETTE
         panel = ctk.CTkFrame(self, fg_color=p["bg"], corner_radius=0)
         panel.place(in_=self.body, relx=0, rely=0, relwidth=1, relheight=1)
-        panel.lift()
+        panel.lower()
         panel.bind("<Escape>", lambda _e: self._cancel_vault_panel())
-        self._vault_panel = panel
-        self._apply_native_guard()
 
         card = ctk.CTkFrame(
             panel,
@@ -263,55 +299,43 @@ class MemoApp(ctk.CTk):
         inner = ctk.CTkFrame(card, fg_color="transparent", corner_radius=0)
         inner.pack(fill="both", expand=True, padx=20, pady=18)
 
-        titles = {
-            "create": (
-                "🔒  创建私密笔记库",
-                "只有你主动移进来的便签才会加密；其他便签仍然是 Markdown 明文。",
-            ),
-            "unlock": ("🔒  私密笔记库", "输入主密码，或使用 Windows Hello 解锁。"),
-            "password": ("🔒  更改主密码", "更改后，Windows Hello 的快捷解锁会同步更新。"),
-        }
-        title, desc = titles.get(mode, titles["unlock"])
-        ctk.CTkLabel(
+        self._vault_title = ctk.CTkLabel(
             inner,
-            text=title,
+            text="",
             font=ctk.CTkFont(family=FONT_FAMILY, size=16, weight="bold"),
             text_color=p["fg"],
             anchor="w",
-        ).pack(fill="x")
-        ctk.CTkLabel(
+        )
+        self._vault_title.pack(fill="x")
+        self._vault_desc = ctk.CTkLabel(
             inner,
-            text=desc,
+            text="",
             font=self.font_small,
             text_color=p["muted"],
             anchor="w",
             justify="left",
             wraplength=320,
-        ).pack(fill="x", pady=(2, 12))
+        )
+        self._vault_desc.pack(fill="x", pady=(2, 12))
 
-        fields = {
-            "create": [("主密码", "至少 6 位"), ("确认主密码", "再输入一次")],
-            "unlock": [("主密码", "输入主密码")],
-            "password": [
-                ("当前主密码", "验证身份"),
-                ("新主密码", "至少 6 位"),
-                ("确认新主密码", "再输入一次"),
-            ],
-        }[mode]
-
-        self._vault_entries: list[ctk.CTkEntry] = []
-        for name, hint in fields:
-            ctk.CTkLabel(
-                inner,
-                text=name,
+        # 三种模式最多三个密码框，全部预建，按模式显示前 N 组
+        fields = ctk.CTkFrame(inner, fg_color="transparent", corner_radius=0)
+        fields.pack(fill="x")
+        fields.columnconfigure(0, weight=1)
+        self._vault_field_rows: list[tuple] = []
+        for index in range(3):
+            label = ctk.CTkLabel(
+                fields,
+                text="",
                 font=self.font_tiny,
                 text_color=p["muted"],
                 anchor="w",
-            ).pack(fill="x", pady=(0, 2))
+            )
+            label.grid(row=index * 2, column=0, sticky="ew", pady=(0, 2))
             entry = ctk.CTkEntry(
-                inner,
+                fields,
                 show="•",
-                placeholder_text=hint,
+                placeholder_text="",
                 height=34,
                 corner_radius=9,
                 border_width=1,
@@ -320,9 +344,9 @@ class MemoApp(ctk.CTk):
                 text_color=p["fg"],
                 font=self.font_small,
             )
-            entry.pack(fill="x", pady=(0, 8))
+            entry.grid(row=index * 2 + 1, column=0, sticky="ew", pady=(0, 8))
             entry.bind("<Return>", lambda _e: self._vault_primary())
-            self._vault_entries.append(entry)
+            self._vault_field_rows.append((label, entry))
 
         self._vault_msg = ctk.CTkLabel(
             inner,
@@ -337,7 +361,7 @@ class MemoApp(ctk.CTk):
 
         self._vault_primary_btn = ctk.CTkButton(
             inner,
-            text={"create": "创建并解锁", "unlock": "解锁", "password": "更改密码"}[mode],
+            text="",
             height=34,
             corner_radius=9,
             fg_color=p["accent"],
@@ -349,36 +373,28 @@ class MemoApp(ctk.CTk):
         )
         self._vault_primary_btn.pack(fill="x", pady=(2, 0))
 
-        self._vault_hello_btn = None
-        if mode == "unlock" and self.vault is not None and self.vault.hello_ready():
-            self._vault_hello_btn = ctk.CTkButton(
-                inner,
-                text="使用 Windows Hello 解锁",
-                height=32,
-                corner_radius=9,
-                fg_color=p["strip"],
-                hover_color="#EFE1A6",
-                text_color=p["fg"],
-                font=self.font_small,
-                command=self._vault_hello,
-            )
-            self._vault_hello_btn.pack(fill="x", pady=(8, 0))
-
-        self._vault_forgot_btn = None
-        if mode == "unlock" and self.vault is not None:
-            self._vault_forgot_btn = ctk.CTkButton(
-                inner,
-                text="忘记密码？",
-                height=26,
-                corner_radius=8,
-                fg_color="transparent",
-                hover_color=p["strip"],
-                text_color=p["muted"],
-                font=self.font_tiny,
-                command=self._vault_forgot,
-            )
-            self._vault_forgot_btn.pack(fill="x", pady=(8, 0))
-
+        self._vault_hello_btn = ctk.CTkButton(
+            inner,
+            text="使用 Windows Hello 解锁",
+            height=32,
+            corner_radius=9,
+            fg_color=p["strip"],
+            hover_color="#EFE1A6",
+            text_color=p["fg"],
+            font=self.font_small,
+            command=self._vault_hello,
+        )
+        self._vault_forgot_btn = ctk.CTkButton(
+            inner,
+            text="忘记密码？",
+            height=26,
+            corner_radius=8,
+            fg_color="transparent",
+            hover_color=p["strip"],
+            text_color=p["muted"],
+            font=self.font_tiny,
+            command=self._vault_forgot,
+        )
         self._vault_cancel_btn = ctk.CTkButton(
             inner,
             text="取消",
@@ -392,7 +408,69 @@ class MemoApp(ctk.CTk):
         )
         self._vault_cancel_btn.pack(fill="x", pady=(8, 0))
 
-        self.after(120, self._vault_entries[0].focus_set)
+        self._vault_cache = panel
+        return panel
+
+    def _fill_vault_panel(self, mode: str) -> None:
+        """按模式改写面板内容，而不是重建控件。"""
+        p = PALETTE
+        titles = {
+            "create": (
+                "🔒  创建私密笔记库",
+                "只有你主动移进来的便签才会加密；其他便签仍然是 Markdown 明文。",
+            ),
+            "unlock": ("🔒  私密笔记库", "输入主密码，或使用 Windows Hello 解锁。"),
+            "password": ("🔒  更改主密码", "更改后，Windows Hello 的快捷解锁会同步更新。"),
+        }
+        title, desc = titles.get(mode, titles["unlock"])
+        self._vault_title.configure(text=title)
+        self._vault_desc.configure(text=desc)
+
+        fields = {
+            "create": [("主密码", "至少 6 位"), ("确认主密码", "再输入一次")],
+            "unlock": [("主密码", "输入主密码")],
+            "password": [
+                ("当前主密码", "验证身份"),
+                ("新主密码", "至少 6 位"),
+                ("确认新主密码", "再输入一次"),
+            ],
+        }[mode]
+
+        self._vault_entries = []
+        for index, (label, entry) in enumerate(self._vault_field_rows):
+            if index < len(fields):
+                name, hint = fields[index]
+                label.configure(text=name)
+                entry.configure(placeholder_text=hint)
+                label.grid()
+                entry.grid()
+                try:
+                    entry.delete(0, "end")
+                except tk.TclError:
+                    pass
+                self._vault_entries.append(entry)
+            else:
+                label.grid_remove()
+                entry.grid_remove()
+
+        self._vault_msg.configure(text="", text_color=p["muted"])
+        self._vault_primary_btn.configure(
+            text={"create": "创建并解锁", "unlock": "解锁", "password": "更改密码"}[mode],
+            state="normal",
+        )
+
+        # Windows Hello 与「忘记密码」只在解锁页出现，且依赖库的状态
+        hello_ok = mode == "unlock" and self.vault is not None and self.vault.hello_ready()
+        self._place_vault_button(self._vault_hello_btn, hello_ok)
+        self._place_vault_button(
+            self._vault_forgot_btn, mode == "unlock" and self.vault is not None
+        )
+
+    def _place_vault_button(self, button, visible: bool) -> None:
+        if visible:
+            button.pack(fill="x", pady=(8, 0), before=self._vault_cancel_btn)
+        else:
+            button.pack_forget()
 
     def _vault_set_busy(self, busy: bool, message: str = "") -> None:
         self._vault_busy = busy
@@ -569,8 +647,9 @@ class MemoApp(ctk.CTk):
         panel = getattr(self, "_vault_panel", None)
         self._vault_panel = None
         if panel is not None:
+            # 面板留着复用，压到 body 之下即可；重建要 100ms 以上。
             try:
-                panel.destroy()
+                panel.lower()
             except tk.TclError:
                 pass
         self._apply_native_guard()
@@ -631,6 +710,9 @@ class MemoApp(ctk.CTk):
             return
         try:
             overlay = MenuOverlay(self, self._menu_items)
+            overlay._signature = tuple(
+                (label, shortcut) for label, shortcut, _cmd in self._menu_items
+            )
             self._menu_cache[self.library] = overlay
             # 先放到窗口外完成一次布局，之后显示时就不用再做冷布局
             overlay.place(x=-10000, y=-10000)
@@ -754,12 +836,6 @@ class MemoApp(ctk.CTk):
     # ------------------------------------------------------------------
     def _build_menu(self) -> None:
         """不再使用系统菜单栏，改为顶部「⋯」展开的卡片菜单。"""
-        for overlay in getattr(self, "_menu_cache", {}).values():
-            try:
-                overlay.destroy()
-            except tk.TclError:
-                pass
-        self._menu_cache = {}
         self._menu_items = [
             ("设置…", "Ctrl+,", self.open_settings),
             (None, "", None),
@@ -784,7 +860,20 @@ class MemoApp(ctk.CTk):
             len(self._menu_items) - 1,
         )
         self._menu_items[index + 1:index + 1] = [(None, "", None), *extra]
-        self._menu: MenuOverlay | None = None
+        self._menu = None
+
+        # 两个库的菜单条目不同，但各自是固定的；缓存按库分开存，切库时别把
+        # 另一份拆了重建——构造要 7ms，离屏布局还要 36ms，来回切库会反复付。
+        signature = tuple((label, shortcut) for label, shortcut, _cmd in self._menu_items)
+        cached = self._menu_cache.get(self.library)
+        if cached is not None:
+            if getattr(cached, "_signature", None) == signature:
+                return
+            try:
+                cached.destroy()
+            except tk.TclError:
+                pass
+            self._menu_cache.pop(self.library, None)
         self.after(60, self._prewarm_menu)
 
     def _dismiss_menu(self) -> None:
@@ -809,6 +898,9 @@ class MemoApp(ctk.CTk):
         overlay = self._menu_cache.get(self.library)
         if overlay is None:
             overlay = MenuOverlay(self, self._menu_items)
+            overlay._signature = tuple(
+                (label, shortcut) for label, shortcut, _cmd in self._menu_items
+            )
             self._menu_cache[self.library] = overlay
         self._menu = overlay
         overlay.open()
@@ -913,6 +1005,7 @@ class MemoApp(ctk.CTk):
 
     def _shortcut(self, callback):
         # 设置页或提示卡片打开时，不让全局快捷键操作背后的便签
+        self._last_input = time.monotonic()
         if self._settings_panel is not None or self._trash_panel is not None or self._modal_depth:
             return "break"
         callback()
@@ -1556,6 +1649,7 @@ class MemoApp(ctk.CTk):
     def _mark_dirty(self) -> None:
         self._dirty = True
         self._last_change = datetime.now()
+        self._last_input = time.monotonic()
         # 每敲一个字都去刷新状态栏会拖慢输入法，只在首次进入编辑时更新一次
         if getattr(self, "_status_text", "") != "编辑中…":
             self.set_status("编辑中…")
@@ -1833,26 +1927,40 @@ class MemoApp(ctk.CTk):
         if getattr(self, "_settings_panel", None) is not None:
             return
         self.close_trash()
-        panel = getattr(self, "_settings_cache", None)
+        panel = self._live_settings()
         if panel is not None:
-            try:
-                exists = bool(panel.winfo_exists())
-            except tk.TclError:
-                exists = False
-            if exists:
-                # 复用上次的设置面板：第二次打开几乎即时
-                self._settings_panel = panel
-                panel.sync()
-                panel.place(in_=self, relx=0, rely=0, relwidth=1, relheight=1)
-                panel.lift()
-                panel._bind_esc()
-                panel.focus_set()
-                self._apply_native_guard()
-                return
+            # 复用缓存的面板：面板一直挂在窗口里，只是压在 body 之下。
+            # 显示只需 lift()，不必重新 place()——place 会触发整棵子树重排，
+            # 实测要 150ms 以上，而 lift() 只要几毫秒。
+            self._settings_panel = panel
+            panel.sync()
+            # 预热面板的首个分页可能还没轮到建（预热走 after(0) 分帧），
+            # 这时先补上，否则打开会看到一块空白。
+            panel._ensure_tab("通用")
+            panel.lift()
+            panel._bind_esc()
+            panel.focus_set()
+            panel._schedule_tab_prewarm()
+            self._apply_native_guard()
+            return
         panel = SettingsPanel(self)
         self._settings_cache = panel
         self._settings_panel = panel
+        panel._schedule_tab_prewarm()
         self._apply_native_guard()
+
+    def _live_settings(self):
+        """返回仍然存在的缓存设置面板，顺便丢掉已销毁的引用。"""
+        panel = getattr(self, "_settings_cache", None)
+        if panel is None:
+            return None
+        try:
+            if not panel.winfo_exists():
+                raise tk.TclError("gone")
+        except tk.TclError:
+            self._settings_cache = None
+            return None
+        return panel
 
     def close_settings(self) -> None:
         panel = getattr(self, "_settings_panel", None)
@@ -1871,8 +1979,9 @@ class MemoApp(ctk.CTk):
                     child._close()
                 except tk.TclError:
                     pass
+        panel._cancel_tab_prewarm()
         try:
-            panel.place_forget()
+            panel.lower()
         except tk.TclError:
             pass
         self._apply_native_guard()
@@ -1883,8 +1992,31 @@ class MemoApp(ctk.CTk):
             panel.reload()
             panel.lift()
             return
-        self._trash_panel = TrashPanel(self)
+        cached = self._live_trash()
+        if cached is not None:
+            self._trash_panel = cached
+            cached.reload()
+            cached.lift()
+            cached._bind_esc()
+            cached.focus_set()
+            self._apply_native_guard()
+            return
+        panel = TrashPanel(self)
+        self._trash_cache = panel
+        self._trash_panel = panel
         self._apply_native_guard()
+
+    def _live_trash(self):
+        panel = getattr(self, "_trash_cache", None)
+        if panel is None:
+            return None
+        try:
+            if not panel.winfo_exists():
+                raise tk.TclError("gone")
+        except tk.TclError:
+            self._trash_cache = None
+            return None
+        return panel
 
     def close_trash(self) -> None:
         panel = self._trash_panel
@@ -1898,7 +2030,7 @@ class MemoApp(ctk.CTk):
                 pass
             panel._esc_bind = None
         try:
-            panel.destroy()
+            panel.lower()
         except tk.TclError:
             pass
         try:
@@ -1906,6 +2038,116 @@ class MemoApp(ctk.CTk):
         except tk.TclError:
             pass
         self._apply_native_guard()
+
+    # ------------------------------------------------------------------
+    # 空闲预热：把最常用的两个面板提前建好，第一次打开就不用等构建
+    # ------------------------------------------------------------------
+    # 建一个设置面板要 350ms 以上的主线程计算，外加一次 400ms 级的布局刷新。
+    # 用户在启动后马上开始打字时，这段计算会直接卡住输入法，所以预热必须
+    # 等到真正没人操作才做——每 400ms 探一次，够安静才动手。
+    _PREWARM_IDLE = 4.0
+    _PREWARM_PROBE = 400
+    _PREWARM_GAP = 500
+
+    def _idle_seconds(self) -> float:
+        return time.monotonic() - self._last_input
+
+    def _prewarm_allowed(self) -> bool:
+        return (
+            not self._closing
+            and self._modal_depth == 0
+            and self._idle_seconds() >= self._PREWARM_IDLE
+        )
+
+    def _wait_for_idle(self, step) -> None:
+        """没人操作才继续；有人刚动过就再等一轮。"""
+        if self._closing:
+            return
+        if not self._prewarm_allowed():
+            self._prewarm_job = self.after(self._PREWARM_PROBE, step)
+            return
+        step()
+
+    def _schedule_prewarm(self) -> None:
+        if self._prewarm_job is not None or self._closing:
+            return
+        self._prewarm_job = self.after(1200, self._prewarm_settings)
+
+    def _prewarm_settings(self) -> None:
+        """启动后空闲时构建设置面板。面板建好后压在 body 之下，看不见。"""
+        self._prewarm_job = None
+        if self._closing:
+            return
+        if self._settings_panel is not None:
+            # 用户已经自己打开了设置，改天再说
+            self._prewarm_job = self.after(1500, self._prewarm_settings)
+            return
+        if self._live_settings() is not None:
+            self._prewarm_job = self.after(self._PREWARM_GAP, self._prewarm_trash)
+            return
+        if not self._prewarm_allowed():
+            self._wait_for_idle(self._prewarm_settings)
+            return
+        try:
+            panel = SettingsPanel(self, prewarm=True)
+        except Exception:
+            LOG.exception("预热设置面板失败")
+            return
+        self._settings_cache = panel
+        # 面板藏在 body 之下，趁启动后的空闲把四个分页也建好：
+        # 用户真正打开设置时，连第一次点分页都不用等构建。
+        try:
+            panel._schedule_tab_prewarm()
+        except Exception:  # pragma: no cover - 预热失败不影响正常使用
+            LOG.exception("安排设置分页预热失败")
+        # 先让出一次事件循环，别把预热和启动收尾挤在同一帧里
+        self._prewarm_job = self.after(self._PREWARM_GAP, self._prewarm_trash)
+
+    def _prewarm_trash(self) -> None:
+        self._prewarm_job = None
+        if self._closing:
+            return
+        if self._trash_panel is None and self._live_trash() is None:
+            if not self._prewarm_allowed():
+                self._wait_for_idle(self._prewarm_trash)
+                return
+            try:
+                self._trash_cache = TrashPanel(self, prewarm=True)
+            except Exception:
+                LOG.exception("预热回收站失败")
+        # 私密库面板建一次要 150ms 以上，趁空闲先建好；解锁时只改写内容
+        self._prewarm_job = self.after(self._PREWARM_GAP, self._prewarm_vault_panel)
+
+    def _prewarm_vault_panel(self) -> None:
+        self._prewarm_job = None
+        if self._closing:
+            return
+        if self._vault_panel is None and getattr(self, "_vault_cache", None) is None:
+            if not self._prewarm_allowed():
+                self._wait_for_idle(self._prewarm_vault_panel)
+                return
+            try:
+                self._ensure_vault_panel()
+                # 连按钮排布一起做完：第一次打开时只剩改文字。
+                # 没有私密库时打开面板走的是「创建」，别预热错模式。
+                self._fill_vault_panel("unlock" if self.vault is not None else "create")
+            except Exception:
+                LOG.exception("预热私密库面板失败")
+        self._prewarm_job = self.after(self._PREWARM_GAP, self._prewarm_preview)
+
+    def _prewarm_preview(self) -> None:
+        """预览区第一次渲染要 50ms 以上（Text 打 tag + 插入文本），
+        趁空闲先渲一遍空文档，把 tag 配置和首次布局做掉。"""
+        self._prewarm_job = None
+        if self._closing or self._preview_mode:
+            return
+        if not self._prewarm_allowed():
+            self._wait_for_idle(self._prewarm_preview)
+            return
+        try:
+            self.md_view.render("")
+        except Exception:
+            LOG.exception("预热预览区失败")
 
     def _need_unlock(self) -> None:
         self.show_info("私密笔记库", "请先解锁私密笔记库。")
@@ -1992,6 +2234,12 @@ class MemoApp(ctk.CTk):
         if self._closing:
             return
         self._closing = True
+        if self._prewarm_job is not None:
+            try:
+                self.after_cancel(self._prewarm_job)
+            except Exception:
+                pass
+            self._prewarm_job = None
         if self._settings_panel is not None:
             self.close_settings()
         cache = self._settings_cache
@@ -2003,6 +2251,21 @@ class MemoApp(ctk.CTk):
                 pass
         if self._trash_panel is not None:
             self.close_trash()
+        trash_cache = self._trash_cache
+        self._trash_cache = None
+        if trash_cache is not None:
+            try:
+                trash_cache.destroy()
+            except tk.TclError:
+                pass
+        vault_cache = self._vault_cache
+        self._vault_cache = None
+        self._vault_panel = None
+        if vault_cache is not None:
+            try:
+                vault_cache.destroy()
+            except tk.TclError:
+                pass
         try:
             self.save_current(refresh=False)
         except Exception:
@@ -2615,14 +2878,19 @@ class InWindowDialog(ctk.CTkFrame):
 class TrashPanel(ctk.CTkFrame):
     """回收站：普通便签与私密便签删除后都会列在这里，可一键恢复。"""
 
-    def __init__(self, app: MemoApp) -> None:
+    def __init__(self, app: MemoApp, prewarm: bool = False) -> None:
         p = PALETTE
         super().__init__(app.body, fg_color=p["bg"], corner_radius=0)
         self.app = app
         self._esc_bind: str | None = None
+        self._reload_sig = None
 
         self.place(in_=app.body, relx=0, rely=0, relwidth=1, relheight=1)
-        self.lift()
+        if prewarm:
+            # 预热：先压到 body 之下，用户看不见；真正打开时再 lift()
+            self.lower()
+        else:
+            self.lift()
 
         wrapper = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
         wrapper.pack(fill="both", expand=True, padx=14, pady=12)
@@ -2674,8 +2942,15 @@ class TrashPanel(ctk.CTkFrame):
             pass
 
         self.reload()
+        self._esc_bind = None
+        if not prewarm:
+            self._bind_esc()
+            self.focus_set()
+
+    def _bind_esc(self) -> None:
+        if self._esc_bind is not None:
+            return
         self._esc_bind = self.app.bind("<Escape>", self._on_escape, add="+")
-        self.focus_set()
 
     # ------------------------------------------------------------------
     def entries(self) -> list:
@@ -2686,9 +2961,18 @@ class TrashPanel(ctk.CTkFrame):
 
     def reload(self) -> None:
         p = PALETTE
+        items = self.entries()
+        # 内容没变就别重建：CustomTkinter 每个卡片要 20ms 以上，
+        # 每次打开回收站都推倒重来会白等 40ms。
+        signature = (
+            tuple((str(e.path), e.title, e.source_label, e.deleted_label) for e in items),
+            self.app.vault is not None and self.app.vault_store is None,
+        )
+        if signature == getattr(self, "_reload_sig", None):
+            return
+        self._reload_sig = signature
         for child in self.list_frame.winfo_children():
             child.destroy()
-        items = self.entries()
 
         if self.app.vault is not None and self.app.vault_store is None:
             ctk.CTkLabel(
@@ -2778,23 +3062,69 @@ class TrashPanel(ctk.CTkFrame):
 
 
 class _LazyTabview(ctk.CTkTabview):
-    """CTkTabview.set() 不会触发 command，这里补上按需构建的回调。"""
+    """设置分页容器，两处改造：
+
+    1. CTkTabview.set() 不会触发 command，这里补上按需构建的回调；
+    2. 切分页不再用 grid_forget()/grid()——那会触发新分页整棵子树重新布局，
+       实测 100~200ms；改成「所有分页都留在同一格里，切换只 tkraise()」，
+       实测 3~6ms。
+    """
 
     def __init__(self, *args, on_select=None, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self._on_select = on_select
 
+    def _tab_grid_row(self) -> int:
+        anchor = str(self._anchor).lower()
+        return 3 if anchor in ("center", "w", "nw", "n", "ne", "e") else 0
+
+    def stack_all(self) -> None:
+        """把所有分页叠进同一格（先建的先画，后建的盖在上面）。
+
+        新分页建好后要立刻调用一次：让它的首次布局发生在构建/预热阶段，
+        而不是用户点过来的那一刻。叠好后把当前分页重新提到最上层。
+        """
+        pad = self._apply_widget_scaling(max(self._corner_radius, self._border_width))
+        row = self._tab_grid_row()
+        for frame in self._tab_dict.values():
+            if frame.winfo_manager() != "grid":
+                frame.grid(row=row, column=0, sticky="nsew", padx=pad, pady=pad)
+        current = self._tab_dict.get(self._current_name)
+        if current is not None:
+            current.tkraise()
+
+    def _activate(self, name: str) -> None:
+        if name not in self._tab_dict:
+            raise ValueError(f"CTkTabview has no tab named '{name}'")
+        self.stack_all()
+        self._current_name = name
+        self._segmented_button.set(name)
+        self._tab_dict[name].tkraise()
+
     def set(self, name: str) -> None:
-        super().set(name)
+        self._activate(name)
         callback = getattr(self, "_on_select", None)
         if callback is not None:
             callback(name)
+
+    def _segmented_button_callback(self, selected_name: str) -> None:
+        self._activate(selected_name)
+        bg, fg = self._bg_color, self._fg_color
+        if self._command is not None:
+            self._command()
+            self._segmented_button.configure(background_corner_colors=(bg, bg, bg, bg))
+            return
+        anchor = str(self._anchor).lower()
+        if anchor in ("center", "w", "nw", "n", "ne", "e"):
+            self._segmented_button.configure(background_corner_colors=(bg, bg, fg, fg))
+        else:
+            self._segmented_button.configure(background_corner_colors=(fg, fg, bg, bg))
 
 
 class SettingsPanel(ctk.CTkFrame):
     """设置面板：覆盖在主窗口内，不再打开独立窗口。"""
 
-    def __init__(self, app: MemoApp) -> None:
+    def __init__(self, app: MemoApp, prewarm: bool = False) -> None:
         super().__init__(app, fg_color=PALETTE["bg"], corner_radius=0)
         self.app = app
         self.cfg = app.cfg
@@ -2803,12 +3133,20 @@ class SettingsPanel(ctk.CTkFrame):
         self._esc_bind: str | None = None
         self._tab_scrolls: dict[str, ctk.CTkFrame] = {}
         self._built_tabs: set[str] = set()
+        self._tab_job = None
+        self._prewarm = prewarm
 
         self.place(in_=app, relx=0, rely=0, relwidth=1, relheight=1)
-        self.lift()
+        if prewarm:
+            # 预热时压到最底层：面板一直挂着，但用户看不见也点不到。
+            # 打开时只 lift()，省掉整棵子树的重新布局。
+            self.lower()
+        else:
+            self.lift()
         self._build()
-        self._bind_esc()
-        self.focus_set()
+        if not prewarm:
+            self._bind_esc()
+            self.focus_set()
 
     def _bind_esc(self) -> None:
         if self._esc_bind is not None:
@@ -2919,12 +3257,27 @@ class SettingsPanel(ctk.CTkFrame):
             command=self._cancel,
         ).pack(side="right", padx=(0, 8))
 
-        # 先把设置面板画出来，再构建分页内容，避免打开时整窗像卡住
+        # 先把设置面板画出来，再构建分页内容，避免打开时整窗像卡住。
+        # 预热时面板压在最底层、用户看不见，没必要抢这一帧去画；
+        # 分页也挪到下一个事件循环，把这一大块拆成两小段。
+        if self._prewarm:
+            self.after(0, self._build_first_tab)
+            return
         try:
             self.app.update_idletasks()
         except tk.TclError:  # pragma: no cover
             pass
         self._ensure_tab("通用")
+
+    def _build_first_tab(self) -> None:
+        if getattr(self, "_closed", True):
+            return
+        if "通用" in self._built_tabs:
+            return
+        try:
+            self._ensure_tab("通用")
+        except Exception:  # pragma: no cover - 预热失败不影响正常使用
+            LOG.exception("构建通用分页失败")
 
     def _field(
         self,
@@ -3049,6 +3402,7 @@ class SettingsPanel(ctk.CTkFrame):
             frame.columnconfigure(1, weight=1)
             self._tab_scrolls[name] = frame
             self._build_general(frame)
+            self.nb.stack_all()
             return
         scroll = ctk.CTkScrollableFrame(
             self.nb.tab(name), fg_color="transparent", corner_radius=0
@@ -3071,6 +3425,50 @@ class SettingsPanel(ctk.CTkFrame):
             self._build_onedrive(scroll)
         elif name == "GitHub":
             self._build_github(scroll)
+        # 分页建好就叠进布局：让首次布局在预热阶段完成，用户点过来时只剩 tkraise
+        self.nb.stack_all()
+
+    # ---- 空闲预热其余分页：用户点过去时就不用等构建 ----
+    _PENDING_TABS = ("私密库", "OneDrive", "GitHub")
+
+    def _schedule_tab_prewarm(self) -> None:
+        if self._tab_job is not None:
+            # 已经排过一次，别再叠一个定时器，否则每次打开设置都会多跑一条链
+            return
+        self._tab_job = self.after(700, self._prewarm_next_tab)
+
+    def _prewarm_next_tab(self) -> None:
+        self._tab_job = None
+        if getattr(self, "_closed", True):
+            return
+        pending = [name for name in self._PENDING_TABS if name not in self._built_tabs]
+        if not pending:
+            return
+        # 用户刚敲过字就先让路：分页构建要 200~350ms，别抢输入法的帧
+        if not self.app._prewarm_allowed():
+            self._tab_job = self.after(self.app._PREWARM_PROBE, self._prewarm_next_tab)
+            return
+        try:
+            self._ensure_tab(pending[0])
+        except Exception:  # pragma: no cover - 预热失败不影响正常使用
+            LOG.exception("预热设置分页 %s 失败", pending[0])
+            self._built_tabs.discard(pending[0])
+            return
+        self._tab_job = self.after(500, self._prewarm_next_tab)
+
+    def _cancel_tab_prewarm(self) -> None:
+        job = getattr(self, "_tab_job", None)
+        self._tab_job = None
+        if job is not None:
+            try:
+                self.after_cancel(job)
+            except Exception:
+                pass
+
+    def destroy(self) -> None:
+        self._cancel_tab_prewarm()
+        self._closed = True
+        super().destroy()
 
     def _build_general(self, frame) -> None:
         self._field(frame, 0, "开机自动启动", "general.autostart", "bool")
@@ -3471,9 +3869,25 @@ class SettingsPanel(ctk.CTkFrame):
         ).grid(row=6, column=0, columnspan=2, sticky="w", padx=(4, 4), pady=(10, 6))
 
     def _refresh_vault_tab(self) -> None:
+        """私密库分页内容重建很贵（70ms+），状态没变就跳过。"""
         frame = getattr(self, "vault_frame", None)
-        if frame is not None and frame.winfo_exists():
-            self._build_vault(frame)
+        if frame is None or not frame.winfo_exists():
+            return
+        signature = self._vault_signature()
+        if signature == getattr(self, "_vault_sig", None):
+            return
+        self._vault_sig = signature
+        self._build_vault(frame)
+
+    def _vault_signature(self) -> tuple:
+        vault = self.app.vault
+        if vault is None:
+            return (False, False, False, False)
+        try:
+            hello_on = bool(vault.hello_enabled())
+        except Exception:  # pragma: no cover - 读取失败按未启处理
+            hello_on = False
+        return (True, self.app.vault_store is not None, hello_on, hello.available())
 
     def _create_vault(self) -> None:
         if self.app.vault is not None:
@@ -3506,6 +3920,7 @@ class SettingsPanel(ctk.CTkFrame):
             self.cfg.save()
         except OSError:
             LOG.exception("保存 Hello 设置失败")
+        self._vault_sig = None
         self._refresh_vault_tab()
 
     def _change_password(self) -> None:

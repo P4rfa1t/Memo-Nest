@@ -19,3 +19,6 @@ dist/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# 性能测试脚本与样本数据（本地用，不进仓库）
+.perf/

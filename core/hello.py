@@ -35,15 +35,27 @@ _TEXTS = {
 }
 
 
+_AVAILABLE_CACHE: bool | None = None
+
+
 def available() -> bool:
-    """Windows Hello 是否可用（不弹窗）。"""
+    """Windows Hello 是否可用（不弹窗）。
+
+    check_availability_async 每次都要新建一个 asyncio 事件循环并加载 WinRT
+    投影，实测 40ms 以上；结果在进程生命周期内不会变，缓存一次即可。
+    """
+    global _AVAILABLE_CACHE
+    if _AVAILABLE_CACHE is not None:
+        return _AVAILABLE_CACHE
     if not HAS_WINRT:
+        _AVAILABLE_CACHE = False
         return False
     try:
-        return asyncio.run(_check()) == UserConsentVerifierAvailability.AVAILABLE
+        _AVAILABLE_CACHE = asyncio.run(_check()) == UserConsentVerifierAvailability.AVAILABLE
     except Exception:  # pragma: no cover
         LOG.exception("检测 Windows Hello 失败")
         return False
+    return _AVAILABLE_CACHE
 
 
 async def _check():
