@@ -21,11 +21,12 @@ from pathlib import Path
 
 from . import config as cfgmod
 from . import crypto, dpapi, hello
-from .storage import Note, iso_now
+from .storage import Note, TrashEntry, _guess_title, iso_now, trash_stamp
 
 LOG = logging.getLogger("memonest.vault")
 
 AAD_NOTE = b"memonest-note-v1"
+AAD_TRASH = b"memonest-trash-v1"
 
 
 class VaultError(RuntimeError):
@@ -206,7 +207,7 @@ class Vault:
             target = self.trash_dir / f"{path.name}.mdenc"
             try:
                 target.write_bytes(
-                    crypto.encrypt(self.key, path.read_bytes(), b"memonest-trash-v1")
+                    crypto.encrypt(self.key, path.read_bytes(), AAD_TRASH)
                 )
                 path.unlink()
             except OSError:
@@ -300,6 +301,75 @@ class VaultStore:
 
     def get(self, note_id: str) -> Note | None:
         return self.notes.get(note_id)
+
+    # ---------- 回收站 ----------
+    def _read_trash(self, path: Path) -> tuple[dict | None, str]:
+        """返回 (笔记载荷, 明文 Markdown)；旧版迁移来的文件只有明文。"""
+        key = self.vault.key
+        if key is None:
+            return None, ""
+        note_id = path.stem.split("-")[0]
+        if note_id:
+            try:
+                return _open_note(key, path.read_bytes(), note_id), ""
+            except Exception:
+                pass
+        try:
+            text = crypto.decrypt(key, path.read_bytes(), AAD_TRASH).decode(
+                "utf-8", errors="replace"
+            )
+        except Exception:
+            LOG.warning("无法解密回收站文件 %s", path.name)
+            return None, ""
+        return None, text
+
+    def list_trash(self) -> list[TrashEntry]:
+        entries: list[TrashEntry] = []
+        for path in self.trash_dir.glob("*.mdenc"):
+            payload, text = self._read_trash(path)
+            if payload is None and not text:
+                continue
+            if payload is not None:
+                title = str(payload.get("title") or "未命名笔记")
+                note_id = path.stem.split("-")[0]
+                tags = [str(t) for t in payload.get("tags") or []]
+            else:
+                title = _guess_title(text, path.stem)
+                note_id = ""
+                tags = []
+            entries.append(
+                TrashEntry(
+                    path=path,
+                    title=title,
+                    deleted_at=trash_stamp(path),
+                    source="vault",
+                    note_id=note_id,
+                    tags=tags,
+                )
+            )
+        return sorted(entries, key=lambda e: e.deleted_at, reverse=True)
+
+    def restore_trash(self, entry: TrashEntry) -> Note | None:
+        payload, text = self._read_trash(entry.path)
+        if payload is None and not text:
+            return None
+        if payload is not None:
+            note = Note.from_dict(payload)
+            note.id = uuid.uuid4().hex[:12]
+            note.content = str(payload.get("content", ""))
+        else:
+            note = Note(
+                id=uuid.uuid4().hex[:12],
+                title=_guess_title(text, "未命名笔记"),
+                content=text,
+            )
+        note.updated = iso_now()
+        self.save(note)
+        try:
+            entry.path.unlink()
+        except OSError:
+            pass
+        return note
 
     # ---------- 查询 ----------
     def all_notes(self) -> list[Note]:

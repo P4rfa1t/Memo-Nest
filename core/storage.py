@@ -88,6 +88,40 @@ class Note:
         )
 
 
+@dataclass
+class TrashEntry:
+    """回收站里的一条记录，普通库与私密库共用。"""
+
+    path: Path
+    title: str
+    deleted_at: datetime
+    source: str = "note"  # note | vault
+    note_id: str = ""
+    tags: list[str] = field(default_factory=list)
+
+    @property
+    def deleted_label(self) -> str:
+        return f"{self.deleted_at:%Y-%m-%d %H:%M}"
+
+    @property
+    def source_label(self) -> str:
+        return "私密便签" if self.source == "vault" else "普通便签"
+
+
+def trash_stamp(path: Path) -> datetime:
+    """从回收站文件名里的 -YYYYMMDD-HHMMSS 还原删除时间。"""
+    match = re.search(r"-(\d{8}-\d{6})$", path.stem)
+    if match:
+        try:
+            return datetime.strptime(match.group(1), "%Y%m%d-%H%M%S")
+        except ValueError:
+            pass
+    try:
+        return datetime.fromtimestamp(path.stat().st_mtime)
+    except OSError:
+        return datetime.now()
+
+
 class Store:
     """负责笔记的加载、保存、删除与检索。"""
 
@@ -191,11 +225,67 @@ class Store:
                 shutil.move(str(source), str(target))
             except OSError:
                 pass
+            else:
+                # 标题写在 index.json 里，正文不一定有；留一份旁注，回收站才显示得对
+                meta = {
+                    "title": note.title,
+                    "created": note.created,
+                    "tags": note.tags,
+                    "deleted": iso_now(),
+                }
+                try:
+                    target.with_suffix(".json").write_text(
+                        json.dumps(meta, ensure_ascii=False), encoding="utf-8"
+                    )
+                except OSError:
+                    pass
         self.save_index()
         return True
 
     def get(self, note_id: str) -> Note | None:
         return self.notes.get(note_id)
+
+    # ---------- 回收站 ----------
+    def list_trash(self) -> list[TrashEntry]:
+        entries: list[TrashEntry] = []
+        for path in self.trash_dir.glob("*.md"):
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            meta: dict = {}
+            meta_path = path.with_suffix(".json")
+            if meta_path.exists():
+                try:
+                    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    meta = {}
+            title = str(meta.get("title") or "") or _guess_title(text, path.stem)
+            entries.append(
+                TrashEntry(
+                    path=path,
+                    title=title,
+                    deleted_at=trash_stamp(path),
+                    tags=[str(t) for t in meta.get("tags") or []],
+                )
+            )
+        return sorted(entries, key=lambda e: e.deleted_at, reverse=True)
+
+    def restore_trash(self, entry: TrashEntry) -> Note | None:
+        try:
+            content = entry.path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return None
+        note = self.create(entry.title, content)
+        if entry.tags:
+            note.tags = list(entry.tags)
+            self.save(note)
+        for path in (entry.path, entry.path.with_suffix(".json")):
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        return note
 
     # ---------- 查询 ----------
     def all_notes(self) -> list[Note]:

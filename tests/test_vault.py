@@ -142,6 +142,21 @@ class VaultTests(unittest.TestCase):
         self.assertFalse((self.base / "vault" / "items" / f"{note.id}.mdenc").exists())
         self.assertEqual(len(list((self.base / "vault" / "trash").glob("*.mdenc"))), 1)
 
+    def test_trash_list_and_restore(self) -> None:
+        self.vault.create("password123")
+        store = VaultStore(self.vault)
+        note = store.create("私密待删", "# 私密待删\n\n内容")
+        store.delete(note.id)
+        entries = store.list_trash()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].title, "私密待删")
+        self.assertEqual(entries[0].source, "vault")
+        restored = store.restore_trash(entries[0])
+        self.assertIsNotNone(restored)
+        self.assertEqual(restored.title, "私密待删")
+        self.assertIn("内容", store.get(restored.id).content)
+        self.assertEqual(store.list_trash(), [])
+
     def test_migrate_trash_removes_plaintext(self) -> None:
         self.vault.create("password123")
         trash = self.base / "trash"

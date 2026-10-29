@@ -90,6 +90,7 @@ WELCOME = """\
 ## 快速上手
 
 - 顶部下拉框切换便签，按 `+` 新建，点 📌 置顶当前便签
+- 点 🗑 删除当前便签，删掉的便签可在「⋯ → 回收站」恢复
 - 内容会自动保存，不需要手动保存
 - 点「预览」查看渲染效果，再点一次回到编辑
 - 点 🔍 搜索便签，`Esc` 收起；`Ctrl+F` 也能打开
@@ -165,6 +166,7 @@ class MemoApp(ctk.CTk):
         self._preview_mode = False
         self._save_job: str | None = None
         self._search_job: str | None = None
+        self._stats_job: str | None = None
         self._auto_job: str | None = None
         self._backup_running = False
         self._last_backup: datetime | None = None
@@ -179,6 +181,8 @@ class MemoApp(ctk.CTk):
         self._vault_entries: list[ctk.CTkEntry] = []
         self._menu_cache: dict[str, MenuOverlay] = {}
         self._settings_panel = None
+        self._settings_cache = None
+        self._trash_panel = None
         self._modal_depth = 0
 
         self.font_ui = ctk.CTkFont(family=FONT_FAMILY, size=13)
@@ -695,6 +699,7 @@ class MemoApp(ctk.CTk):
             ("导出为 Markdown…", "", self.export_note),
             ("打开数据文件夹", "", lambda: self._open_path(cfgmod.DATA_DIR)),
             ("删除当前便签", "Ctrl+D", self.delete_note),
+            ("回收站…", "", self.show_trash),
             (None, "", None),
             ("使用说明", "", self.show_help),
             ("关于 MemoNest", "", self.show_about),
@@ -747,7 +752,7 @@ class MemoApp(ctk.CTk):
 
     def _shortcut(self, callback):
         # 设置页或提示卡片打开时，不让全局快捷键操作背后的便签
-        if self._settings_panel is not None or self._modal_depth:
+        if self._settings_panel is not None or self._trash_panel is not None or self._modal_depth:
             return "break"
         callback()
         return "break"
@@ -818,11 +823,13 @@ class MemoApp(ctk.CTk):
         self.menu_button = ctk.CTkButton(
             actions,
             text="⋯",
-            width=28,
+            width=30,
             height=25,
             corner_radius=8,
-            fg_color="transparent",
-            hover_color="#F1E3A9",
+            fg_color=p["strip"],
+            hover_color="#EFDFA0",
+            border_width=1,
+            border_color="#DCC888",
             text_color=p["fg"],
             font=ctk.CTkFont(family=FONT_FAMILY, size=16, weight="bold"),
             command=self.show_menu,
@@ -865,6 +872,19 @@ class MemoApp(ctk.CTk):
             command=self.toggle_pin,
         )
         self.pin_button.grid(row=0, column=1, padx=(8, 0))
+        self.trash_button = ctk.CTkButton(
+            selector,
+            text="🗑",
+            width=30,
+            height=30,
+            corner_radius=10,
+            fg_color="transparent",
+            hover_color="#F1E3A9",
+            text_color=p["muted"],
+            font=ctk.CTkFont(family=FONT_FAMILY, size=13),
+            command=self.delete_note,
+        )
+        self.trash_button.grid(row=0, column=2, padx=(6, 0))
         self.search_button = ctk.CTkButton(
             selector,
             text="🔍",
@@ -877,7 +897,7 @@ class MemoApp(ctk.CTk):
             font=ctk.CTkFont(family=FONT_FAMILY, size=13),
             command=self.toggle_search,
         )
-        self.search_button.grid(row=0, column=2, padx=(6, 0))
+        self.search_button.grid(row=0, column=3, padx=(6, 0))
         ctk.CTkButton(
             selector,
             text="+",
@@ -889,7 +909,7 @@ class MemoApp(ctk.CTk):
             text_color="#3B3323",
             font=ctk.CTkFont(family=MONO_FAMILY, size=17, weight="bold"),
             command=self.new_note,
-        ).grid(row=0, column=3, padx=(6, 0))
+        ).grid(row=0, column=4, padx=(6, 0))
 
         self.search_row = ctk.CTkFrame(top, fg_color="transparent", corner_radius=0)
         self.search_row.grid(row=2, column=0, sticky="ew", pady=(7, 0))
@@ -1015,7 +1035,7 @@ class MemoApp(ctk.CTk):
         )
         self.editor.grid(row=0, column=0, sticky="nsew")
         self.editor.bind("<<Modified>>", self._on_modified)
-        self.editor.bind("<KeyRelease>", lambda _e: self._update_stats())
+        self.editor.bind("<KeyRelease>", lambda _e: self._schedule_stats())
 
         self.preview = tk.Text(text_wrap, **text_options)
         md_palette = {
@@ -1222,10 +1242,9 @@ class MemoApp(ctk.CTk):
             return
         if self.current is None:
             return
-        where = "私密库的加密回收站" if self.library == "vault" else "data/trash 中找回"
         if not self.ask_yes_no(
             "删除便签",
-            f"确定删除《{self.current.title}》吗？\n删除后可在 {where} 找回。",
+            f"确定删除《{self.current.title}》吗？\n删除后可在「⋯ → 回收站」里恢复。",
         ):
             return
         self.store.delete(self.current.id)
@@ -1233,6 +1252,8 @@ class MemoApp(ctk.CTk):
         notes = self.refresh_list()
         if notes:
             self.load_note(notes[0])
+        if self._trash_panel is not None:
+            self._trash_panel.reload()
         self.set_status("已删除便签")
 
     def toggle_pin(self) -> None:
@@ -1330,11 +1351,22 @@ class MemoApp(ctk.CTk):
     # 保存
     # ------------------------------------------------------------------
     def _on_modified(self, _event=None) -> None:
-        if self.editor.edit_modified():
+        if not self.editor.edit_modified():
+            return
+        if self._loading:
             self.editor.edit_modified(False)
-            if self._loading:
-                return
-            self._mark_dirty()
+            return
+        # 拼音输入法在组合过程中也会触发 <<Modified>>，立刻改标记会打断候选框，
+        # 因此放到空闲时再清掉，输入法有完整的一帧去绘制候选窗口。
+        self.after_idle(self._reset_modified)
+        self._mark_dirty()
+
+    def _reset_modified(self) -> None:
+        try:
+            if self.editor.edit_modified():
+                self.editor.edit_modified(False)
+        except tk.TclError:  # pragma: no cover - 窗口已关闭
+            pass
 
     def _on_field_change(self, _event=None) -> None:
         if self._loading:
@@ -1344,7 +1376,9 @@ class MemoApp(ctk.CTk):
     def _mark_dirty(self) -> None:
         self._dirty = True
         self._last_change = datetime.now()
-        self.set_status("编辑中…")
+        # 每敲一个字都去刷新状态栏会拖慢输入法，只在首次进入编辑时更新一次
+        if getattr(self, "_status_text", "") != "编辑中…":
+            self.set_status("编辑中…")
         self._schedule_save()
 
     def _schedule_save(self, delay: int = 900) -> None:
@@ -1449,6 +1483,19 @@ class MemoApp(ctk.CTk):
         lines = text.count("\n") + 1 if text else 0
         self.stats_label.configure(text=f"{chars} 字 · {lines} 行")
 
+    def _schedule_stats(self, delay: int = 180) -> None:
+        """字数统计放到停顿后再算，避免每个按键都读一遍全文。"""
+        if self._stats_job:
+            try:
+                self.after_cancel(self._stats_job)
+            except Exception:
+                pass
+        self._stats_job = self.after(delay, self._update_stats_now)
+
+    def _update_stats_now(self) -> None:
+        self._stats_job = None
+        self._update_stats()
+
     def _show_editor_menu(self, event) -> None:
         menu = tk.Menu(self, tearoff=0)
         menu.add_command(label="剪切", command=lambda: self._editor_action("<<Cut>>"))
@@ -1486,6 +1533,7 @@ class MemoApp(ctk.CTk):
     # 状态 / 备份
     # ------------------------------------------------------------------
     def set_status(self, text: str) -> None:
+        self._status_text = text
         if hasattr(self, "status_label"):
             self.status_label.configure(text=text)
 
@@ -1584,7 +1632,25 @@ class MemoApp(ctk.CTk):
     def open_settings(self) -> None:
         if getattr(self, "_settings_panel", None) is not None:
             return
-        self._settings_panel = SettingsPanel(self)
+        self.close_trash()
+        panel = getattr(self, "_settings_cache", None)
+        if panel is not None:
+            try:
+                exists = bool(panel.winfo_exists())
+            except tk.TclError:
+                exists = False
+            if exists:
+                # 复用上次的设置面板：第二次打开几乎即时
+                self._settings_panel = panel
+                panel.sync()
+                panel.place(in_=self, relx=0, rely=0, relwidth=1, relheight=1)
+                panel.lift()
+                panel._bind_esc()
+                panel.focus_set()
+                return
+        panel = SettingsPanel(self)
+        self._settings_cache = panel
+        self._settings_panel = panel
 
     def close_settings(self) -> None:
         panel = getattr(self, "_settings_panel", None)
@@ -1604,14 +1670,35 @@ class MemoApp(ctk.CTk):
                 except tk.TclError:
                     pass
         try:
+            panel.place_forget()
+        except tk.TclError:
+            pass
+
+    def show_trash(self) -> None:
+        panel = self._trash_panel
+        if panel is not None:
+            panel.reload()
+            panel.lift()
+            return
+        self._trash_panel = TrashPanel(self)
+
+    def close_trash(self) -> None:
+        panel = self._trash_panel
+        if panel is None:
+            return
+        self._trash_panel = None
+        if getattr(panel, "_esc_bind", None) is not None:
+            try:
+                self.unbind("<Escape>", panel._esc_bind)
+            except tk.TclError:
+                pass
+            panel._esc_bind = None
+        try:
             panel.destroy()
         except tk.TclError:
             pass
         try:
-            if getattr(panel, "_saved_state", "normal") == "zoomed":
-                self.state("zoomed")
-            elif getattr(panel, "_saved_geometry", ""):
-                self.geometry(panel._saved_geometry)
+            self.body.focus_set()
         except tk.TclError:
             pass
 
@@ -1625,12 +1712,14 @@ class MemoApp(ctk.CTk):
         """消息卡片要盖在当前最上层的面板上，而不是被设置页挡住。"""
         if self._settings_panel is not None:
             return self._settings_panel
+        if self._trash_panel is not None:
+            return self._trash_panel
         if self._vault_panel is not None:
             return self._vault_panel
         return self.body
 
-    def show_info(self, title: str, message: str) -> None:
-        InWindowDialog(self, title, message).show()
+    def show_info(self, title: str, message: str, link: str | None = None) -> None:
+        InWindowDialog(self, title, message, link=link).show()
 
     def show_warning(self, title: str, message: str) -> None:
         InWindowDialog(self, title, message, tone="warning").show()
@@ -1670,6 +1759,7 @@ class MemoApp(ctk.CTk):
             "MemoNest 便签\n\n"
             "· 顶部下拉框切换便签，「＋」新建\n"
             "· 📌 把当前便签置顶（列表最前）\n"
+            "· 🗑 删除当前便签，可在「⋯ → 回收站」里恢复\n"
             "· 🔍 展开搜索，回车打开第一条，Esc 收起\n"
             "· 标题与正文自动保存，无需手动保存（Ctrl+S 仍可用）\n"
             "· 「预览」查看 Markdown 效果，Ctrl+E 切换\n"
@@ -1684,10 +1774,11 @@ class MemoApp(ctk.CTk):
         self.show_info(
             "关于",
             f"{cfgmod.APP_NAME}  v{cfgmod.APP_VERSION}\n\n"
-            "便签式的本地 Markdown 备忘录。\n"
-            "CustomTkinter 界面 · OneDrive 云备份 · GitHub 同步\n"
-            "可选私密笔记库（主密码 + Windows Hello）\n\n"
+            "便签式的本地 Markdown 备忘录。\n\n"
+            "项目地址：\n"
+            "https://github.com/P4rfa1t/Memo-Nest\n\n"
             f"数据目录：{cfgmod.DATA_DIR}",
+            link="https://github.com/P4rfa1t/Memo-Nest",
         )
 
     def on_close(self) -> None:
@@ -1696,6 +1787,15 @@ class MemoApp(ctk.CTk):
         self._closing = True
         if self._settings_panel is not None:
             self.close_settings()
+        cache = self._settings_cache
+        self._settings_cache = None
+        if cache is not None:
+            try:
+                cache.destroy()
+            except tk.TclError:
+                pass
+        if self._trash_panel is not None:
+            self.close_trash()
         try:
             self.save_current(refresh=False)
         except Exception:
@@ -1762,7 +1862,7 @@ class MenuOverlay(ctk.CTkFrame):
             corner_radius=12,
             border_width=1,
             border_color=p["border"],
-            width=214,
+            width=186,
         )
         self.app = app
         self._closed = True
@@ -1781,11 +1881,12 @@ class MenuOverlay(ctk.CTkFrame):
                 self,
                 bg=p["card"],
                 height=self._row_h,
+                width=168,
                 bd=0,
                 highlightthickness=0,
                 cursor="hand2",
             )
-            row.pack(fill="x", padx=5, pady=1)
+            row.pack(fill="x", padx=4, pady=1)
             name = row.create_text(
                 9,
                 self._row_h // 2,
@@ -1899,6 +2000,7 @@ class InWindowDialog(ctk.CTkFrame):
         ok_text: str = "知道了",
         cancel_text: str = "取消",
         tone: str = "info",
+        link: str | None = None,
     ) -> None:
         p = PALETTE
         host = app._modal_host()
@@ -1971,6 +2073,19 @@ class InWindowDialog(ctk.CTkFrame):
 
         buttons = ctk.CTkFrame(inner, fg_color="transparent", corner_radius=0)
         buttons.pack(fill="x", pady=(16, 0))
+        if link:
+            ctk.CTkButton(
+                buttons,
+                text="打开项目主页",
+                width=110,
+                height=34,
+                corner_radius=9,
+                fg_color="transparent",
+                hover_color=p["strip"],
+                text_color="#8A7420",
+                font=self.app.font_tiny,
+                command=lambda: self._open_link(link),
+            ).pack(side="left")
         ctk.CTkButton(
             buttons,
             text=ok_text,
@@ -2012,6 +2127,12 @@ class InWindowDialog(ctk.CTkFrame):
     def _on_escape(self, _event=None) -> None:
         self._finish(False)
 
+    def _open_link(self, url: str) -> None:
+        try:
+            webbrowser.open(url)
+        except Exception:  # pragma: no cover - 打不开浏览器时忽略
+            pass
+
     def _finish(self, value: bool) -> None:
         if self._done:
             return
@@ -2027,6 +2148,180 @@ class InWindowDialog(ctk.CTkFrame):
         self.destroy()
 
 
+class TrashPanel(ctk.CTkFrame):
+    """回收站：普通便签与私密便签删除后都会列在这里，可一键恢复。"""
+
+    def __init__(self, app: MemoApp) -> None:
+        p = PALETTE
+        super().__init__(app.body, fg_color=p["bg"], corner_radius=0)
+        self.app = app
+        self._esc_bind: str | None = None
+
+        self.place(in_=app.body, relx=0, rely=0, relwidth=1, relheight=1)
+        self.lift()
+
+        wrapper = ctk.CTkFrame(self, fg_color="transparent", corner_radius=0)
+        wrapper.pack(fill="both", expand=True, padx=14, pady=12)
+
+        head = ctk.CTkFrame(wrapper, fg_color="transparent", corner_radius=0)
+        head.pack(fill="x")
+        ctk.CTkLabel(
+            head,
+            text="🗑  回收站",
+            font=ctk.CTkFont(family=FONT_FAMILY, size=17, weight="bold"),
+            text_color=p["fg"],
+        ).pack(side="left")
+        ctk.CTkButton(
+            head,
+            text="返回便签",
+            width=84,
+            height=28,
+            corner_radius=8,
+            fg_color="transparent",
+            hover_color=p["strip"],
+            text_color=p["muted"],
+            border_width=1,
+            border_color=p["border"],
+            font=self.app.font_tiny,
+            command=self.close,
+        ).pack(side="right")
+
+        ctk.CTkLabel(
+            wrapper,
+            text="删除的便签会留在这里，恢复后回到原来的便签库。",
+            font=self.app.font_tiny,
+            text_color=p["muted"],
+            anchor="w",
+            justify="left",
+            wraplength=330,
+        ).pack(fill="x", pady=(2, 8))
+
+        self.list_frame = ctk.CTkScrollableFrame(
+            wrapper, fg_color="transparent", corner_radius=0
+        )
+        self.list_frame.pack(fill="both", expand=True)
+        try:
+            self.list_frame._scrollbar.configure(
+                fg_color="transparent",
+                button_color="#E8D79E",
+                button_hover_color="#DDC885",
+            )
+        except Exception:  # pragma: no cover - CTk 内部实现变化
+            pass
+
+        self.reload()
+        self._esc_bind = self.app.bind("<Escape>", self._on_escape, add="+")
+        self.focus_set()
+
+    # ------------------------------------------------------------------
+    def entries(self) -> list:
+        items = list(self.app.plain_store.list_trash())
+        if self.app.vault_store is not None:
+            items.extend(self.app.vault_store.list_trash())
+        return sorted(items, key=lambda e: e.deleted_at, reverse=True)
+
+    def reload(self) -> None:
+        p = PALETTE
+        for child in self.list_frame.winfo_children():
+            child.destroy()
+        items = self.entries()
+
+        if self.app.vault is not None and self.app.vault_store is None:
+            ctk.CTkLabel(
+                self.list_frame,
+                text="私密库当前已锁定，解锁后才能看到加密回收站里的便签。",
+                font=self.app.font_tiny,
+                text_color=p["muted"],
+                anchor="w",
+                justify="left",
+                wraplength=310,
+            ).pack(fill="x", padx=4, pady=(0, 8))
+
+        if not items:
+            ctk.CTkLabel(
+                self.list_frame,
+                text="回收站是空的。",
+                font=self.app.font_small,
+                text_color=p["muted"],
+                anchor="w",
+            ).pack(fill="x", padx=4, pady=18)
+            return
+
+        for entry in items:
+            card = ctk.CTkFrame(
+                self.list_frame,
+                fg_color=p["card"],
+                corner_radius=10,
+                border_width=1,
+                border_color=p["border"],
+            )
+            card.pack(fill="x", pady=(0, 6))
+            card.columnconfigure(0, weight=1)
+            title = entry.title if len(entry.title) <= 18 else entry.title[:18] + "…"
+            ctk.CTkLabel(
+                card,
+                text=title,
+                font=self.app.font_small,
+                text_color=p["fg"],
+                anchor="w",
+            ).grid(row=0, column=0, sticky="w", padx=(10, 6), pady=(7, 0))
+            ctk.CTkLabel(
+                card,
+                text=f"{entry.source_label} · {entry.deleted_label}",
+                font=self.app.font_tiny,
+                text_color=p["muted"],
+                anchor="w",
+            ).grid(row=1, column=0, sticky="w", padx=(10, 6), pady=(0, 7))
+            ctk.CTkButton(
+                card,
+                text="恢复",
+                width=52,
+                height=26,
+                corner_radius=8,
+                fg_color=p["accent"],
+                hover_color=p["accent_hover"],
+                text_color="#3B3323",
+                font=self.app.font_tiny,
+                command=lambda e=entry: self.restore(e),
+            ).grid(row=0, column=1, rowspan=2, padx=(0, 8), pady=6)
+
+    def restore(self, entry) -> None:
+        if entry.source == "vault":
+            store = self.app.vault_store
+            if store is None:
+                self.app.show_warning("回收站", "私密库已锁定，先解锁才能恢复这条便签。")
+                return
+        else:
+            store = self.app.plain_store
+        note = store.restore_trash(entry)
+        if note is None:
+            self.app.show_error("回收站", "这条便签已经无法读取，可能文件已被移走。")
+            return
+        self.app.refresh_list()
+        self.app.set_status(f"已从回收站恢复《{note.title}》")
+        self.reload()
+
+    def _on_escape(self, _event=None) -> None:
+        self.close()
+
+    def close(self) -> None:
+        self.app.close_trash()
+
+
+class _LazyTabview(ctk.CTkTabview):
+    """CTkTabview.set() 不会触发 command，这里补上按需构建的回调。"""
+
+    def __init__(self, *args, on_select=None, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._on_select = on_select
+
+    def set(self, name: str) -> None:
+        super().set(name)
+        callback = getattr(self, "_on_select", None)
+        if callback is not None:
+            callback(name)
+
+
 class SettingsPanel(ctk.CTkFrame):
     """设置面板：覆盖在主窗口内，不再打开独立窗口。"""
 
@@ -2036,33 +2331,42 @@ class SettingsPanel(ctk.CTkFrame):
         self.cfg = app.cfg
         self.vars: dict[str, tk.Variable] = {}
         self._closed = False
-        self._saved_geometry = app.geometry()
-        try:
-            self._saved_state = app.state()
-        except tk.TclError:  # pragma: no cover
-            self._saved_state = "normal"
         self._esc_bind: str | None = None
+        self._tab_scrolls: dict[str, ctk.CTkFrame] = {}
+        self._built_tabs: set[str] = set()
 
         self.place(in_=app, relx=0, rely=0, relwidth=1, relheight=1)
         self.lift()
-        self._fit_window()
         self._build()
-        self._esc_bind = app.bind(
-            "<Escape>", lambda _e: None if app._modal_depth else self._cancel(), add="+"
-        )
+        self._bind_esc()
         self.focus_set()
 
-    def _fit_window(self) -> None:
-        try:
-            screen_w = self.winfo_screenwidth()
-            screen_h = self.winfo_screenheight()
-            width = min(max(self.app.winfo_width(), 700), screen_w - 80)
-            height = min(max(self.app.winfo_height(), 660), screen_h - 140)
-            x = max(10, min(self.app.winfo_x(), screen_w - width - 40))
-            y = max(10, min(self.app.winfo_y(), screen_h - height - 80))
-            self.app.geometry(f"{width}x{height}+{x}+{y}")
-        except tk.TclError:  # pragma: no cover
-            pass
+    def _bind_esc(self) -> None:
+        if self._esc_bind is not None:
+            return
+        self._esc_bind = self.app.bind(
+            "<Escape>",
+            lambda _e: None if self.app._modal_depth else self._cancel(),
+            add="+",
+        )
+
+    def sync(self) -> None:
+        """复用时把控件状态同步回配置文件，避免显示上一次的值。"""
+        self.cfg.load()
+        for key, var in self.vars.items():
+            value = self.cfg.get(key)
+            if isinstance(var, tk.BooleanVar):
+                var.set(bool(value))
+            else:
+                var.set("" if value is None else str(value))
+        if hasattr(self, "_mode_var"):
+            mode = str(self.cfg.get("onedrive.mode", "folder") or "folder")
+            self._mode_value = "graph" if mode == "graph" else "folder"
+            self._mode_var.set(self._MODE_LABELS[self._mode_value])
+            self._apply_mode_visibility()
+        self._refresh_vault_tab()
+        if "OneDrive" in self._built_tabs:
+            self._refresh_onedrive_status()
 
     def _build(self) -> None:
         p = PALETTE
@@ -2090,8 +2394,9 @@ class SettingsPanel(ctk.CTkFrame):
             command=self._cancel,
         ).pack(side="right")
 
-        self.nb = ctk.CTkTabview(
+        self.nb = _LazyTabview(
             wrapper,
+            on_select=self._ensure_tab,
             fg_color=p["card"],
             corner_radius=12,
             border_width=1,
@@ -2107,28 +2412,15 @@ class SettingsPanel(ctk.CTkFrame):
 
         for name in ("通用", "私密库", "OneDrive", "GitHub"):
             self.nb.add(name)
-            scroll = ctk.CTkScrollableFrame(
-                self.nb.tab(name), fg_color="transparent", corner_radius=0
-            )
-            scroll.pack(fill="both", expand=True, padx=6, pady=6)
-            scroll.columnconfigure(1, weight=1)
-            try:
-                scroll._scrollbar.configure(
-                    fg_color="transparent",
-                    button_color="#E8D79E",
-                    button_hover_color="#DDC885",
-                )
-            except Exception:  # pragma: no cover - CTk 内部实现变化
-                pass
-            if name == "通用":
-                self._build_general(scroll)
-            elif name == "私密库":
-                self.vault_frame = scroll
-                self._build_vault(scroll)
-            elif name == "OneDrive":
-                self._build_onedrive(scroll)
-            else:
-                self._build_github(scroll)
+        self.nb.configure(command=self._on_tab_change)
+        loading = ctk.CTkLabel(
+            self.nb.tab("通用"),
+            text="正在载入设置…",
+            font=self.app.font_small,
+            text_color=p["muted"],
+        )
+        loading.place(relx=0.5, rely=0.5, anchor="center")
+        self._loading_label = loading
 
         buttons = ctk.CTkFrame(wrapper, fg_color="transparent", corner_radius=0)
         buttons.pack(fill="x")
@@ -2158,6 +2450,13 @@ class SettingsPanel(ctk.CTkFrame):
             command=self._cancel,
         ).pack(side="right", padx=(0, 8))
 
+        # 先把设置面板画出来，再构建分页内容，避免打开时整窗像卡住
+        try:
+            self.app.update_idletasks()
+        except tk.TclError:  # pragma: no cover
+            pass
+        self._ensure_tab("通用")
+
     def _field(
         self,
         parent,
@@ -2184,7 +2483,7 @@ class SettingsPanel(ctk.CTkFrame):
                 width=46,
                 height=24,
                 corner_radius=12,
-                fg_color="#E8D9A8",
+                fg_color="#E3D4A0",
                 progress_color=p["accent"],
                 button_color="#FFFDF2",
                 button_hover_color="#FFF8E0",
@@ -2211,6 +2510,7 @@ class SettingsPanel(ctk.CTkFrame):
             holder = ctk.CTkFrame(parent, fg_color="transparent", corner_radius=0)
             holder.grid(row=row, column=1, sticky="ew", pady=(10, 2))
             holder.columnconfigure(0, weight=1)
+            entry_options["width"] = 60  # 让输入框跟着剩余空间伸展，窄窗口也不挤
             ctk.CTkEntry(holder, **entry_options).grid(row=0, column=0, sticky="ew")
             ctk.CTkButton(
                 holder,
@@ -2250,9 +2550,58 @@ class SettingsPanel(ctk.CTkFrame):
                 text_color=p["muted"],
                 anchor="w",
                 justify="left",
-                wraplength=460,
+                wraplength=320,
             ).grid(row=row + 1, column=0, columnspan=2, sticky="w", padx=(4, 4), pady=(0, 4))
         return var
+
+    def _on_tab_change(self, value: str | None = None) -> None:
+        name = value or self.nb.get()
+        if name:
+            self._ensure_tab(name)
+
+    def _ensure_tab(self, name: str) -> None:
+        """分页内容按需构建，第一次打开设置时只建「通用」，避免卡顿。"""
+        if name in self._built_tabs:
+            return
+        self._built_tabs.add(name)
+        if name == "通用":
+            loading = getattr(self, "_loading_label", None)
+            if loading is not None:
+                try:
+                    loading.destroy()
+                except tk.TclError:
+                    pass
+                self._loading_label = None
+            # 通用页内容不多，不需要滚动条，少一层 Canvas 打开更快
+            frame = ctk.CTkFrame(
+                self.nb.tab(name), fg_color="transparent", corner_radius=0
+            )
+            frame.pack(fill="both", expand=True, padx=10, pady=8)
+            frame.columnconfigure(1, weight=1)
+            self._tab_scrolls[name] = frame
+            self._build_general(frame)
+            return
+        scroll = ctk.CTkScrollableFrame(
+            self.nb.tab(name), fg_color="transparent", corner_radius=0
+        )
+        scroll.pack(fill="both", expand=True, padx=6, pady=6)
+        scroll.columnconfigure(1, weight=1)
+        try:
+            scroll._scrollbar.configure(
+                fg_color="transparent",
+                button_color="#E8D79E",
+                button_hover_color="#DDC885",
+            )
+        except Exception:  # pragma: no cover - CTk 内部实现变化
+            pass
+        self._tab_scrolls[name] = scroll
+        if name == "私密库":
+            self.vault_frame = scroll
+            self._build_vault(scroll)
+        elif name == "OneDrive":
+            self._build_onedrive(scroll)
+        elif name == "GitHub":
+            self._build_github(scroll)
 
     def _build_general(self, frame) -> None:
         self._field(frame, 0, "开机自动启动", "general.autostart", "bool")
@@ -2278,7 +2627,7 @@ class SettingsPanel(ctk.CTkFrame):
             text_color=PALETTE["muted"],
             anchor="w",
             justify="left",
-            wraplength=460,
+            wraplength=320,
         ).grid(row=7, column=0, columnspan=2, sticky="w", padx=(4, 4), pady=(16, 6))
 
         actions = ctk.CTkFrame(frame, fg_color="transparent", corner_radius=0)
@@ -2302,7 +2651,7 @@ class SettingsPanel(ctk.CTkFrame):
             text_color=PALETTE["muted"],
             anchor="w",
             justify="left",
-            wraplength=460,
+            wraplength=320,
         ).grid(row=9, column=0, columnspan=2, sticky="w", padx=(4, 4), pady=(6, 4))
 
     _MODE_LABELS = {
@@ -2345,7 +2694,7 @@ class SettingsPanel(ctk.CTkFrame):
             text_color=p["muted"],
             anchor="w",
             justify="left",
-            wraplength=470,
+            wraplength=320,
         ).grid(row=2, column=0, columnspan=2, sticky="w", padx=(4, 4), pady=(0, 6))
 
         # ---------------- 文件夹模式 ----------------
@@ -2471,7 +2820,7 @@ class SettingsPanel(ctk.CTkFrame):
             text_color=p["muted"],
             anchor="w",
             justify="left",
-            wraplength=470,
+            wraplength=320,
         ).grid(row=4, column=0, columnspan=2, sticky="w", padx=(4, 4), pady=(10, 6))
 
         self._refresh_onedrive_status()
@@ -2543,7 +2892,7 @@ class SettingsPanel(ctk.CTkFrame):
             text_color=p["muted"],
             anchor="w",
             justify="left",
-            wraplength=470,
+            wraplength=320,
         ).grid(row=2, column=0, columnspan=2, sticky="w", padx=(4, 4), pady=(0, 10))
 
         if not exists:
@@ -2566,7 +2915,7 @@ class SettingsPanel(ctk.CTkFrame):
                 text_color="#B4552F",
                 anchor="w",
                 justify="left",
-                wraplength=470,
+                wraplength=320,
             ).grid(row=4, column=0, columnspan=2, sticky="w", padx=(4, 4), pady=(0, 6))
             return
 
@@ -2584,7 +2933,7 @@ class SettingsPanel(ctk.CTkFrame):
             width=46,
             height=24,
             corner_radius=12,
-            fg_color="#E8D9A8",
+            fg_color="#E3D4A0",
             progress_color=p["accent"],
             button_color="#FFFDF2",
             button_hover_color="#FFF8E0",
@@ -2602,7 +2951,7 @@ class SettingsPanel(ctk.CTkFrame):
             text_color=p["muted"],
             anchor="w",
             justify="left",
-            wraplength=470,
+            wraplength=320,
         ).grid(row=4, column=0, columnspan=2, sticky="w", padx=(4, 4), pady=(0, 8))
 
         actions = ctk.CTkFrame(frame, fg_color="transparent", corner_radius=0)
@@ -2649,7 +2998,7 @@ class SettingsPanel(ctk.CTkFrame):
             text_color=p["muted"],
             anchor="w",
             justify="left",
-            wraplength=470,
+            wraplength=320,
         ).grid(row=6, column=0, columnspan=2, sticky="w", padx=(4, 4), pady=(10, 6))
 
     def _refresh_vault_tab(self) -> None:
@@ -2744,7 +3093,7 @@ class SettingsPanel(ctk.CTkFrame):
             text_color=p["muted"],
             anchor="w",
             justify="left",
-            wraplength=460,
+            wraplength=320,
         ).grid(row=11, column=0, columnspan=2, sticky="w", padx=(4, 4), pady=(12, 6))
 
     def _pick_folder(self, var: tk.StringVar) -> None:

@@ -77,6 +77,20 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(self.store.filter(), [])
         self.assertEqual(len(list((self.base / "trash").glob("*.md"))), 1)
 
+    def test_trash_list_and_restore(self) -> None:
+        note = self.store.create("可恢复", "# 可恢复\n\n正文")
+        self.store.delete(note.id)
+        entries = self.store.list_trash()
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].title, "可恢复")
+        self.assertEqual(entries[0].source, "note")
+        restored = self.store.restore_trash(entries[0])
+        self.assertIsNotNone(restored)
+        self.assertEqual(restored.title, "可恢复")
+        self.assertIn("正文", restored.content)
+        self.assertEqual(self.store.list_trash(), [])
+        self.assertEqual(len(self.store.filter()), 1)
+
     def test_orphan_markdown_is_imported(self) -> None:
         (self.base / "notes").mkdir(parents=True, exist_ok=True)
         (self.base / "notes" / "手写笔记.md").write_text("# 手写笔记\n\n内容", encoding="utf-8")
