@@ -121,6 +121,24 @@ class Vault:
     def lock(self) -> None:
         self.key = None
 
+    def reset(self) -> None:
+        """忘记主密码时彻底清空加密库。
+
+        删除 vault.json（含 Windows Hello 的 DPAPI 绑定）、全部加密笔记与
+        回收站文件，并丢弃内存中的库密钥。此操作不可恢复。
+        """
+        self.key = None
+        if not self.root.exists():
+            return
+        for child in list(self.root.iterdir()):
+            try:
+                if child.is_dir():
+                    shutil.rmtree(child, ignore_errors=True)
+                else:
+                    child.unlink()
+            except OSError:
+                LOG.warning("重置加密库时无法删除 %s", child)
+
     @property
     def unlocked(self) -> bool:
         return self.key is not None

@@ -359,6 +359,21 @@ class MemoApp(ctk.CTk):
             )
             self._vault_hello_btn.pack(fill="x", pady=(8, 0))
 
+        self._vault_forgot_btn = None
+        if mode == "unlock" and self.vault is not None:
+            self._vault_forgot_btn = ctk.CTkButton(
+                inner,
+                text="忘记密码？",
+                height=26,
+                corner_radius=8,
+                fg_color="transparent",
+                hover_color=p["strip"],
+                text_color=p["muted"],
+                font=self.font_tiny,
+                command=self._vault_forgot,
+            )
+            self._vault_forgot_btn.pack(fill="x", pady=(8, 0))
+
         self._vault_cancel_btn = ctk.CTkButton(
             inner,
             text="取消",
@@ -380,6 +395,7 @@ class MemoApp(ctk.CTk):
         for widget in (
             getattr(self, "_vault_primary_btn", None),
             getattr(self, "_vault_hello_btn", None),
+            getattr(self, "_vault_forgot_btn", None),
             getattr(self, "_vault_cancel_btn", None),
         ):
             if widget is not None:
@@ -483,6 +499,42 @@ class MemoApp(ctk.CTk):
             return
         if self._vault_panel is not None:
             self._vault_finish(True)
+
+    def _vault_forgot(self) -> None:
+        """忘记主密码：清空私密库后重新创建（不可恢复）。"""
+        if self._vault_busy or self.vault is None:
+            return
+        if not self.ask_yes_no(
+            "忘记主密码",
+            "重置主密码会永久删除私密库里的全部便签和回收站内容，且无法恢复。\n\n"
+            "普通便签不受影响。确定继续吗？",
+            ok_text="删除并重置",
+        ):
+            return
+        try:
+            self.vault.reset()
+        except Exception as exc:  # pragma: no cover - 取决于文件权限
+            LOG.exception("重置私密笔记库失败")
+            self._vault_fail(f"重置失败：{exc}")
+            return
+        self.vault = None
+        self.vault_store = None
+        self._close_vault_panel()
+        if self.library == "vault":
+            self.store = self.plain_store
+            self.library = "notes"
+            self._after_library_switch()
+        else:
+            self._build_menu()
+        if self._trash_panel is not None:
+            self._trash_panel.reload()
+        self.cfg.set("general.hello_unlock", False)
+        try:
+            self.cfg.save()
+        except OSError:
+            LOG.exception("保存配置失败")
+        self.open_vault_panel("create")
+        self.set_status("私密笔记库已清空，请设置新的主密码")
 
     def _vault_finish(self, ok: bool) -> None:
         intent = self._vault_intent
@@ -604,6 +656,10 @@ class MemoApp(ctk.CTk):
         return True
 
     def _after_library_switch(self, select_id: str | None = None) -> None:
+        if self.library != "vault":
+            # 退出私密库即锁定：内存里的库密钥立刻丢弃，
+            # 下次切到「私密」必须重新输入主密码（或走 Hello）。
+            self._lock_vault_state()
         self.library_tabs.set("私密" if self.library == "vault" else "便签")
         self._build_menu()
         self._apply_library_style()
@@ -664,6 +720,12 @@ class MemoApp(ctk.CTk):
         self._after_library_switch(select_id=target.id)
         self.set_status("已移回普通便签库")
 
+    def _lock_vault_state(self) -> None:
+        """丢弃已解锁状态，不改变当前界面。"""
+        self.vault_store = None
+        if self.vault is not None:
+            self.vault.lock()
+
     def lock_vault(self) -> None:
         if self.vault is None or self._closing:
             return
@@ -676,8 +738,7 @@ class MemoApp(ctk.CTk):
                 LOG.exception("锁定前保存失败")
             self.store = self.plain_store
             self.library = "notes"
-        self.vault_store = None
-        self.vault.lock()
+        self._lock_vault_state()
         if switched:
             self._after_library_switch()
         self.set_status("私密笔记库已锁定")
@@ -1750,7 +1811,9 @@ class MemoApp(ctk.CTk):
 
     def show_help(self) -> None:
         tip = (
-            "· 顶栏「便签 / 私密」切换普通与私密库，Ctrl+L 锁定私密库\n"
+            "· 顶栏「便签 / 私密」切换普通与私密库，Ctrl+L 锁定\n"
+            "· 切回「便签」会立即锁定私密库，下次进入需重新解锁\n"
+            "· 忘记主密码可在解锁面板点「忘记密码？」重置（会清空私密库）\n"
             if self.vault is not None
             else "· 笔记文件位于 data/notes，可直接用其他编辑器编辑\n"
         )

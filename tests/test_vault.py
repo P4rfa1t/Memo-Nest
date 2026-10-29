@@ -110,6 +110,25 @@ class VaultTests(unittest.TestCase):
         self.vault.unlock("newpassword")
         self.assertEqual(self.vault.key, first_key)
 
+    def test_reset_clears_vault_and_allows_recreate(self) -> None:
+        self.vault.create("password123")
+        store = VaultStore(self.vault)
+        store.create("保留下来的便签", "内容")
+        doomed = store.create("回收站目标", "待删")
+        store.delete(doomed.id)
+        self.assertTrue(any(self.vault.trash_dir.glob("*.mdenc")))
+
+        self.vault.reset()
+
+        self.assertFalse(self.vault.exists())
+        self.assertFalse(self.vault.unlocked)
+        self.assertEqual(list(self.vault.root.iterdir()), [])
+        # 重置后可以重新创建，旧密码不再有效
+        self.vault.create("newpassword")
+        fresh = VaultStore(self.vault)
+        self.assertEqual(fresh.all_notes(), [])
+        self.assertEqual(fresh.list_trash(), [])
+
     def test_store_crud_and_ciphertext(self) -> None:
         self.vault.create("password123")
         store = VaultStore(self.vault)
