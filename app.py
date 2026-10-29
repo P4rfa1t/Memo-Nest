@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import queue
 import re
@@ -181,6 +182,7 @@ class MemoApp(ctk.CTk):
         self._vault_busy = False
         self._vault_entries: list[ctk.CTkEntry] = []
         self._menu_cache: dict[str, MenuOverlay] = {}
+        self._editor_menu: ContextMenu | None = None
         self._settings_panel = None
         self._settings_cache = None
         self._trash_panel = None
@@ -786,13 +788,19 @@ class MemoApp(ctk.CTk):
         self.after(60, self._prewarm_menu)
 
     def _dismiss_menu(self) -> None:
-        """点正文等原生控件时，顺手收起还开着的「⋯」菜单。"""
+        """点正文等原生控件时，顺手收起还开着的菜单。"""
         menu = getattr(self, "_menu", None)
         if menu is not None:
             try:
                 menu.close()
             except Exception:
                 LOG.exception("关闭菜单失败")
+        editor_menu = getattr(self, "_editor_menu", None)
+        if editor_menu is not None:
+            try:
+                editor_menu.close()
+            except Exception:
+                LOG.exception("关闭右键菜单失败")
 
     def show_menu(self) -> None:
         if self._menu is not None:
@@ -1677,21 +1685,27 @@ class MemoApp(ctk.CTk):
         self._update_stats()
 
     def _show_editor_menu(self, x: int, y: int) -> None:
-        menu = tk.Menu(self, tearoff=0)
-        menu.add_command(label="撤销", command=self._undo)
-        menu.add_command(label="重做", command=self._redo)
-        menu.add_separator()
-        menu.add_command(label="剪切", command=lambda: self._editor_action("cut"))
-        menu.add_command(label="复制", command=lambda: self._editor_action("copy"))
-        menu.add_command(label="粘贴", command=lambda: self._editor_action("paste"))
-        menu.add_separator()
-        menu.add_command(label="全选", command=lambda: self._editor_action("select_all"))
-        menu.add_separator()
-        menu.add_command(label="插入当前时间", command=self._insert_now)
-        try:
-            menu.tk_popup(x, y)
-        finally:
-            menu.grab_release()
+        """正文右键：自绘卡片菜单，按当前选区 / 剪贴板状态决定条目可用性。"""
+        if self._modal_depth or self._settings_panel is not None or self._trash_panel is not None:
+            return
+        if self._editor_menu is not None:
+            self._editor_menu.close()
+        editor = self.editor
+        has_selection = editor.has_selection()
+        can_paste = editor.can_paste()
+        items = [
+            ("撤销", "Ctrl+Z", self._undo if editor.can_undo() else None),
+            ("重做", "Ctrl+Y", self._redo if editor.can_redo() else None),
+            (None, "", None),
+            ("剪切", "Ctrl+X", (lambda: self._editor_action("cut")) if has_selection else None),
+            ("复制", "Ctrl+C", (lambda: self._editor_action("copy")) if has_selection else None),
+            ("粘贴", "Ctrl+V", (lambda: self._editor_action("paste")) if can_paste else None),
+            (None, "", None),
+            ("全选", "Ctrl+A", lambda: self._editor_action("select_all")),
+            (None, "", None),
+            ("插入当前时间", "", self._insert_now),
+        ]
+        self._editor_menu = ContextMenu(self, items, x, y)
 
     def _insert_now(self) -> None:
         self.editor.insert("insert", datetime.now().strftime("%Y-%m-%d %H:%M"))
@@ -2038,12 +2052,27 @@ class MemoApp(ctk.CTk):
 def _rounded_rect_points(
     x1: float, y1: float, x2: float, y2: float, r: float
 ) -> list[float]:
-    """给 Canvas 的平滑多边形用：四角各放三个点，smooth=True 时就是圆角。"""
-    return [
-        x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r,
-        x2, y2 - r, x2, y2, x2 - r, y2, x1 + r, y2,
-        x1, y2, x1, y2 - r, x1, y1 + r, x1, y1,
-    ]
+    """给 Canvas 多边形用的圆角矩形轮廓。
+
+    Tk 的 smooth 样条只对「点少而疏」的形状做圆滑，四角各放三个点会被拉成
+    近乎直角。这里直接把四段 1/4 圆弧采样成密集点，半径就是真的半径。
+    """
+    r = max(0.0, min(r, (x2 - x1) / 2, (y2 - y1) / 2))
+    if r <= 0:
+        return [x1, y1, x2, y1, x2, y2, x1, y2]
+    steps = 8
+    points: list[float] = []
+
+    def arc(cx: float, cy: float, start: float, end: float) -> None:
+        for index in range(steps + 1):
+            angle = math.radians(start + (end - start) * index / steps)
+            points.extend((cx + r * math.cos(angle), cy + r * math.sin(angle)))
+
+    arc(x2 - r, y1 + r, -90, 0)  # 右上
+    arc(x2 - r, y2 - r, 0, 90)  # 右下
+    arc(x1 + r, y2 - r, 90, 180)  # 左下
+    arc(x1 + r, y1 + r, 180, 270)  # 左上
+    return points
 
 
 class MenuOverlay(ctk.CTkFrame):
@@ -2130,8 +2159,7 @@ class MenuOverlay(ctk.CTkFrame):
         height = canvas.winfo_height() or self._row_h
         canvas.create_polygon(
             _rounded_rect_points(1, 1, width - 1, height - 1, 8),
-            smooth=True,
-            splinesteps=12,
+            smooth=False,
             fill=PALETTE["strip"],
             outline="",
             tags=("hl",),
@@ -2180,6 +2208,231 @@ class MenuOverlay(ctk.CTkFrame):
         self.place_forget()
         if self.app._menu is self:
             self.app._menu = None
+
+
+class ContextMenu:
+    """正文右键菜单：自绘卡片，视觉与「⋯」菜单同一套。
+
+    正文是原生 RichEdit 子窗口，Tk 里 place 出来的控件会被它盖住，所以菜单
+    用无边框 Toplevel 画在鼠标位置，并且常驻最前，保证压在正文之上。
+    不可用的条目（撤销 / 剪切 / 粘贴等）按当前状态灰掉。
+    """
+
+    _ROW_H = 30
+    _SEP_H = 9
+    _PAD_X = 12
+    _GAP = 30
+    _RADIUS = 12
+    _KEY = "#FF00FE"
+
+    def __init__(self, app: "MemoApp", items, screen_x: int, screen_y: int) -> None:
+        self.app = app
+        self._items = list(items)
+        self._closed = False
+        self._hover = -1
+        self._rows: list[tuple[int, int, int]] = []
+        self._canvas: tk.Canvas | None = None
+        self._top: tk.Toplevel | None = None
+        self._build(screen_x, screen_y)
+
+    # ------------------------------------------------------------------
+    # 绘制
+    # ------------------------------------------------------------------
+    def _measure(self) -> tuple[int, int]:
+        width = 172
+        height = 8
+        for label, shortcut, _command in self._items:
+            if label is None:
+                height += self._SEP_H
+                continue
+            height += self._ROW_H
+            span = self.app.font_small.measure(label)
+            if shortcut:
+                span += self._GAP + self.app.font_tiny.measure(shortcut)
+            width = max(width, span + self._PAD_X * 2 + 4)
+        return width, height
+
+    def _build(self, screen_x: int, screen_y: int) -> None:
+        p = PALETTE
+        width, height = self._measure()
+        top = tk.Toplevel(self.app)
+        top.withdraw()
+        top.overrideredirect(True)
+        top.configure(bg=self._KEY)
+        try:
+            top.attributes("-transparentcolor", self._KEY)
+        except tk.TclError:  # pragma: no cover - 非 Windows
+            top.configure(bg=p["card"])
+        top.attributes("-topmost", True)
+
+        screen_w = top.winfo_screenwidth()
+        screen_h = top.winfo_screenheight()
+        x = max(2, min(screen_x, screen_w - width - 2))
+        y = max(2, min(screen_y, screen_h - height - 2))
+        top.geometry(f"{width}x{height}+{x}+{y}")
+
+        canvas = tk.Canvas(
+            top, width=width, height=height, bg=self._KEY, bd=0, highlightthickness=0
+        )
+        canvas.pack(fill="both", expand=True)
+
+        canvas.create_polygon(
+            _rounded_rect_points(0, 0, width - 1, height - 1, self._RADIUS),
+            smooth=False,
+            fill=p["card"],
+            outline=p["border"],
+            width=1,
+        )
+
+        # 先铺一层透明的高亮块，之后只改填充色，避免每次悬停重画
+        cursor_y = 4
+        for index, (label, _shortcut, _command) in enumerate(self._items):
+            if label is None:
+                cursor_y += self._SEP_H
+                continue
+            canvas.create_polygon(
+                _rounded_rect_points(
+                    self._PAD_X - 6,
+                    cursor_y + 1,
+                    width - self._PAD_X + 6,
+                    cursor_y + self._ROW_H - 1,
+                    8,
+                ),
+                smooth=False,
+                fill="",
+                outline="",
+                tags=("hl", str(index)),
+            )
+            self._rows.append((cursor_y, cursor_y + self._ROW_H, index))
+            cursor_y += self._ROW_H
+
+        cursor_y = 4
+        for label, shortcut, command in self._items:
+            if label is None:
+                canvas.create_line(
+                    self._PAD_X,
+                    cursor_y + self._SEP_H // 2,
+                    width - self._PAD_X,
+                    cursor_y + self._SEP_H // 2,
+                    fill=p["border"],
+                )
+                cursor_y += self._SEP_H
+                continue
+            enabled = command is not None
+            middle = cursor_y + self._ROW_H // 2
+            canvas.create_text(
+                self._PAD_X + 2,
+                middle,
+                anchor="w",
+                text=label,
+                font=self.app.font_small,
+                fill=p["fg"] if enabled else "#C9BC8C",
+            )
+            if shortcut:
+                canvas.create_text(
+                    width - self._PAD_X - 2,
+                    middle,
+                    anchor="e",
+                    text=shortcut,
+                    font=self.app.font_tiny,
+                    fill=p["muted"] if enabled else "#DCD2AC",
+                )
+            cursor_y += self._ROW_H
+
+        canvas.bind("<Motion>", self._on_motion)
+        canvas.bind("<Leave>", lambda _e: self._paint(-1))
+        canvas.bind("<Button-1>", self._on_click)
+        top.bind("<Escape>", lambda _e: self.close())
+        top.bind("<Up>", lambda _e: self._move(-1))
+        top.bind("<Down>", lambda _e: self._move(1))
+        top.bind("<Return>", lambda _e: self._activate(self._hover))
+        top.bind("<KP_Enter>", lambda _e: self._activate(self._hover))
+        top.bind("<FocusOut>", lambda _e: self.close())
+
+        self._top = top
+        self._canvas = canvas
+        top.deiconify()
+        top.lift()
+        try:
+            top.focus_force()
+        except tk.TclError:  # pragma: no cover
+            pass
+
+    # ------------------------------------------------------------------
+    # 交互
+    # ------------------------------------------------------------------
+    def _row_at(self, y: int) -> int:
+        for start, end, index in self._rows:
+            if start <= y < end:
+                return index
+        return -1
+
+    def _paint(self, index: int) -> None:
+        if self._canvas is None or index == self._hover:
+            return
+        previous = self._hover
+        self._hover = index
+        for target in (previous, index):
+            if target < 0 or target >= len(self._items):
+                continue
+            enabled = self._items[target][2] is not None
+            self._canvas.itemconfigure(
+                str(target),
+                fill=PALETTE["strip"] if target == index and enabled else "",
+            )
+
+    def _on_motion(self, event) -> None:
+        index = self._row_at(event.y)
+        if index >= 0 and self._items[index][2] is None:
+            index = -1
+        self._paint(index)
+
+    def _move(self, step: int) -> str:
+        usable = [i for i, item in enumerate(self._items) if item[2] is not None]
+        if not usable:
+            return "break"
+        if self._hover in usable:
+            position = usable.index(self._hover) + step
+            position %= len(usable)
+        else:
+            position = 0 if step > 0 else len(usable) - 1
+        self._paint(usable[position])
+        return "break"
+
+    def _on_click(self, event) -> None:
+        index = self._row_at(event.y)
+        if index >= 0:
+            self._activate(index)
+
+    def _activate(self, index: int) -> None:
+        if index < 0 or index >= len(self._items):
+            return
+        command = self._items[index][2]
+        if command is None:
+            return
+        self.close()
+        try:
+            command()
+        except Exception:
+            LOG.exception("右键菜单执行失败")
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._top is not None:
+            try:
+                self._top.destroy()
+            except tk.TclError:
+                pass
+            self._top = None
+        self._canvas = None
+        if getattr(self.app, "_editor_menu", None) is self:
+            self.app._editor_menu = None
+        try:
+            self.app.editor.focus_set()
+        except tk.TclError:
+            pass
 
 
 class InWindowDialog(ctk.CTkFrame):

@@ -57,6 +57,7 @@ WM_PAINT = 0x000F
 WM_CONTEXTMENU = 0x007B
 WM_LBUTTONDOWN = 0x0201
 WM_MOUSEWHEEL = 0x020A
+WM_SETCURSOR = 0x0020
 WM_SETTEXT = 0x000C
 WM_GETTEXT = 0x000D
 WM_GETTEXTLENGTH = 0x000E
@@ -65,6 +66,9 @@ WM_COPY = 0x0301
 WM_PASTE = 0x0302
 
 EM_SETSEL = 0x00B1
+EM_GETSEL = 0x00B0
+EM_CANUNDO = 0x00C6
+EM_CANREDO = 0x0455
 EM_SETRECT = 0x00B3
 EM_LINESCROLL = 0x00B6
 EM_SCROLLCARET = 0x00B7
@@ -188,6 +192,25 @@ GetCursorPos = user32.GetCursorPos
 GetCursorPos.argtypes = [ctypes.c_void_p]
 GetCursorPos.restype = wintypes.BOOL
 
+# 正文是原生 RichEdit，光标由它自己的窗口过程负责。挂在 Tk 的窗口层级下时，
+# 默认过程对 WM_SETCURSOR 返回箭头而不是 I 形光标（纯 Win32 宿主里正常），
+# 所以这里自己接管：客户区一律给 I 形，其它命中区域（滚动条等）交回默认。
+SetCursor = user32.SetCursor
+SetCursor.argtypes = [wintypes.HANDLE]
+SetCursor.restype = wintypes.HANDLE
+
+GetCursor = user32.GetCursor
+GetCursor.argtypes = []
+GetCursor.restype = wintypes.HANDLE
+
+LoadCursorW = user32.LoadCursorW
+LoadCursorW.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+LoadCursorW.restype = wintypes.HANDLE
+
+IDC_IBEAM = 32513
+HTCLIENT = 1
+_IBEAM_CURSOR = LoadCursorW(None, ctypes.c_void_p(IDC_IBEAM))
+
 GetKeyState = user32.GetKeyState
 GetKeyState.argtypes = [ctypes.c_int]
 GetKeyState.restype = ctypes.c_short
@@ -254,6 +277,10 @@ GetClipboardData = user32.GetClipboardData
 GetClipboardData.restype = wintypes.HANDLE
 GetClipboardData.argtypes = [UINT]
 
+IsClipboardFormatAvailable = user32.IsClipboardFormatAvailable
+IsClipboardFormatAvailable.argtypes = [UINT]
+IsClipboardFormatAvailable.restype = wintypes.BOOL
+
 kernel32 = ctypes.windll.kernel32
 GlobalLock = kernel32.GlobalLock
 GlobalLock.restype = LPVOID
@@ -275,6 +302,17 @@ class RECT(ctypes.Structure):
 
 class POINT(ctypes.Structure):
     _fields_ = [("x", LONG), ("y", LONG)]
+
+
+# 单行输入框只有 18~24px 高时，Tk 在鼠标移动后会把光标改回箭头（原生控件自己
+# 设的 I 形光标随后被覆盖）。这里在轮询里兜底：指针停在客户区内就重新设 I 形。
+WindowFromPoint = user32.WindowFromPoint
+WindowFromPoint.argtypes = [POINT]
+WindowFromPoint.restype = HWND
+
+ClientToScreen = user32.ClientToScreen
+ClientToScreen.argtypes = [HWND, ctypes.c_void_p]
+ClientToScreen.restype = wintypes.BOOL
 
 
 class SCROLLINFO(ctypes.Structure):
@@ -365,6 +403,7 @@ class RichEdit(tk.Frame):
         self._swallow_char = False
         self._input_blocked = False
         self._after_id = None
+        self._cursor_after_id = None
         self._font_handle = None
         self._alive = True
         self._in_poll = False
@@ -435,6 +474,7 @@ class RichEdit(tk.Frame):
         self.bind("<Map>", lambda _e: self.after_idle(self._raise_to_top), add="+")
         self.after(30, self._on_configure)
         self._after_id = self.after(80, self._poll)
+        self._cursor_after_id = self.after(150, self._cursor_tick)
 
     # ------------------------------------------------------------------
     # 原生消息
@@ -464,6 +504,11 @@ class RichEdit(tk.Frame):
                     x, y = point.x, point.y
                 self._pending_context = (x, y)
                 return 0
+            elif msg == WM_SETCURSOR:
+                # Tk 宿主下 RichEdit 的默认过程不会给 I 形光标，这里自己设。
+                if (lparam & 0xFFFF) == HTCLIENT:
+                    SetCursor(_IBEAM_CURSOR)
+                    return 1
             elif msg == WM_PAINT:
                 result = CallWindowProcW(
                     self._old_proc, hwnd, msg, wparam, lparam
@@ -700,6 +745,45 @@ class RichEdit(tk.Frame):
             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
         )
 
+    def _keep_cursor(self) -> bool:
+        """指针停在客户区内时保住 I 形光标，返回指针是否在控件内。
+
+        RichEdit 自己在 WM_SETCURSOR 里设的 I 形光标，在单行小尺寸控件上会被
+        Tk 随后的光标更新覆盖成箭头（正文高度够大时不受影响）。这里补设回去。
+        """
+        if not self._hwnd or not IsWindowVisible(self._hwnd):
+            return False
+        point = POINT()
+        if not GetCursorPos(ctypes.byref(point)):
+            return False
+        if WindowFromPoint(point) != self._hwnd:
+            return False
+        rect = RECT()
+        if not GetClientRect(self._hwnd, ctypes.byref(rect)):
+            return False
+        origin = POINT(0, 0)
+        if not ClientToScreen(self._hwnd, ctypes.byref(origin)):
+            return False
+        local_x = point.x - origin.x
+        local_y = point.y - origin.y
+        if not (rect.left <= local_x < rect.right and rect.top <= local_y < rect.bottom):
+            return False
+        if user32.GetCursor() != _IBEAM_CURSOR:
+            SetCursor(_IBEAM_CURSOR)
+        return True
+
+    def _cursor_tick(self) -> None:
+        """悬停时高频补光标，指针离开后降频待命。"""
+        self._cursor_after_id = None
+        if not self._alive:
+            return
+        try:
+            inside = self._keep_cursor()
+        except Exception:
+            inside = False
+        if self._alive:
+            self._cursor_after_id = self.after(25 if inside else 150, self._cursor_tick)
+
     def _ensure_on_top(self) -> None:
         """Tk 的 Frame 窗口随时可能被提到最前，把原生控件盖住。"""
         if not self._hwnd:
@@ -716,6 +800,12 @@ class RichEdit(tk.Frame):
             except Exception:
                 pass
             self._after_id = None
+        if self._cursor_after_id is not None:
+            try:
+                self.after_cancel(self._cursor_after_id)
+            except Exception:
+                pass
+            self._cursor_after_id = None
         if self._font_handle:
             try:
                 gdi32.DeleteObject(self._font_handle)
@@ -823,6 +913,28 @@ class RichEdit(tk.Frame):
 
     def select_all(self) -> None:
         SendMessageW(self._hwnd, EM_SETSEL, 0, -1)
+
+    def can_undo(self) -> bool:
+        return bool(self._hwnd) and bool(SendMessageW(self._hwnd, EM_CANUNDO, 0, 0))
+
+    def can_redo(self) -> bool:
+        return bool(self._hwnd) and bool(SendMessageW(self._hwnd, EM_CANREDO, 0, 0))
+
+    def has_selection(self) -> bool:
+        if not self._hwnd:
+            return False
+        start = ctypes.c_uint32(0)
+        end = ctypes.c_uint32(0)
+        SendMessageW(
+            self._hwnd,
+            EM_GETSEL,
+            ctypes.addressof(start),
+            ctypes.addressof(end),
+        )
+        return start.value != end.value
+
+    def can_paste(self) -> bool:
+        return bool(self._hwnd) and bool(IsClipboardFormatAvailable(CF_UNICODETEXT))
 
     def clear_selection(self) -> None:
         SendMessageW(self._hwnd, EM_SETSEL, 0, 0)
