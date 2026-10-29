@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ctypes
 import logging
+import time
 import tkinter as tk
 from ctypes import wintypes
 from typing import Callable
@@ -171,6 +172,10 @@ IsWindowVisible = user32.IsWindowVisible
 IsWindowVisible.restype = wintypes.BOOL
 IsWindowVisible.argtypes = [HWND]
 
+IsIconic = user32.IsIconic
+IsIconic.restype = wintypes.BOOL
+IsIconic.argtypes = [HWND]
+
 EnableWindow = user32.EnableWindow
 EnableWindow.restype = wintypes.BOOL
 EnableWindow.argtypes = [HWND, wintypes.BOOL]
@@ -185,6 +190,7 @@ HWND_TOP = 0
 GW_HWNDPREV = 3
 SWP_NOSIZE = 0x0001
 SWP_NOMOVE = 0x0002
+SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
 
 SetFocus = user32.SetFocus
@@ -320,6 +326,20 @@ ClientToScreen = user32.ClientToScreen
 ClientToScreen.argtypes = [HWND, ctypes.c_void_p]
 ClientToScreen.restype = wintypes.BOOL
 
+# 窗口从后台/最小化恢复时，Tk 的根窗口只收到 WM_PAINT，不擦背景
+# （见 .perf_msgs.py 记录：恢复那一刻没有 WM_ERASEBKGND）。没有被任何窗口
+# 画过的区域由 DWM 按「无内容」合成成纯黑，用户看到的就是整窗闪黑再重画。
+# 所以恢复时要抢在 Tk 绘制之前，自己用主题底色把客户区刷一遍。
+FillRect = user32.FillRect
+FillRect.argtypes = [wintypes.HDC, ctypes.c_void_p, wintypes.HBRUSH]
+FillRect.restype = ctypes.c_int
+
+CreateSolidBrush = gdi32.CreateSolidBrush
+CreateSolidBrush.restype = wintypes.HBRUSH
+CreateSolidBrush.argtypes = [COLORREF]
+
+WM_WINDOWPOSCHANGED = 0x0047
+
 
 class SCROLLINFO(ctypes.Structure):
     _fields_ = [
@@ -351,6 +371,79 @@ def _colorref(hex_color: str) -> int:
     value = hex_color.lstrip("#")
     r, g, b = int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16)
     return r | (g << 8) | (b << 16)
+
+
+class _RepaintGuard:
+    """窗口从后台/最小化恢复时，防止整窗先黑一下再重画。
+
+    实测（.perf_msgs.py）恢复瞬间 Tk 的根窗口只收到 WM_PAINT，没有
+    WM_ERASEBKGND：那块客户区在 DWM 眼里「没画过」，合成结果就是纯黑。
+    这里子类化根窗口过程，在恢复时先自己把客户区涂成主题底色，再交回 Tk
+    正常绘制。
+
+    WndProc 里**绝不能调用任何 Tk/Tcl 接口**，否则会触发 GIL 致命崩溃。
+    只用 user32/gdi32。涂色只在恢复后的短窗口内进行，之后立刻停手，避免
+    和 Tk 自己的重绘抢同一块像素。
+    """
+
+    def __init__(self, hwnd: int, color_hex: str) -> None:
+        self._hwnd = hwnd
+        self._brush = CreateSolidBrush(_colorref(color_hex))
+        self._old_proc: int | None = None
+        self._was_iconic = bool(user32.IsIconic(hwnd))
+        self._armed_until = 0.0
+        self._proc = CachedWndProc(self._wndproc)
+        old = SetWindowLongPtrW(hwnd, GWLP_WNDPROC, ctypes.cast(self._proc, ctypes.c_void_p))
+        if old:
+            self._old_proc = old
+
+    def _wndproc(self, hwnd, msg, wparam, lparam):
+        if self._brush and msg in (WM_PAINT, WM_WINDOWPOSCHANGED):
+            now = time.monotonic()
+            iconic = bool(user32.IsIconic(hwnd))
+            if self._was_iconic and not iconic:
+                # 刚从最小化恢复：接下来这一小段时间的重绘都可能露黑底。
+                self._armed_until = now + 0.25
+                self._paint_now(hwnd)
+            elif now < self._armed_until and not iconic:
+                self._paint_now(hwnd)
+            self._was_iconic = iconic
+        return CallWindowProcW(self._old_proc, hwnd, msg, wparam, lparam)
+
+    def _paint_now(self, hwnd) -> None:
+        """用底色直接填客户区，不产生新消息，也不碰 Tk。"""
+        brush = self._brush
+        if not brush:
+            return
+        hdc = GetDC(hwnd)
+        if not hdc:
+            return
+        try:
+            rect = RECT()
+            if GetClientRect(hwnd, ctypes.byref(rect)):
+                FillRect(hdc, ctypes.byref(rect), brush)
+        finally:
+            ReleaseDC(hwnd, hdc)
+
+    def dispose(self) -> None:
+        if self._old_proc:
+            SetWindowLongPtrW(self._hwnd, GWLP_WNDPROC, ctypes.c_void_p(self._old_proc))
+            self._old_proc = None
+        if self._brush:
+            DeleteObject(self._brush)
+            self._brush = None
+
+
+def install_repaint_guard(widget, color_hex: str) -> _RepaintGuard | None:
+    """给 Tk 主窗口装上恢复时的背景擦除保护，失败时静默返回 None。"""
+    try:
+        hwnd = user32.GetAncestor(widget.winfo_id(), 2)  # GA_ROOT
+        if not hwnd:
+            return None
+        return _RepaintGuard(hwnd, color_hex)
+    except Exception:
+        LOG.exception("安装重绘保护失败")
+        return None
 
 
 class RichEdit(tk.Frame):
@@ -468,6 +561,7 @@ class RichEdit(tk.Frame):
         self._apply_format()
         self.set_text(text)
         self._hidden = False
+        self._last_geometry = None
 
         self._wndproc_ref = CachedWndProc(self._wndproc)
         self._old_proc = SetWindowLongPtrW(
@@ -478,7 +572,7 @@ class RichEdit(tk.Frame):
 
         self.bind("<Configure>", self._on_configure, add="+")
         self.bind("<Destroy>", self._on_destroy, add="+")
-        self.bind("<Map>", lambda _e: self.after_idle(self._raise_to_top), add="+")
+        self.bind("<Map>", self._on_map, add="+")
         self.after(30, self._on_configure)
         self._after_id = self.after(80, self._poll)
         self._cursor_after_id = self.after(150, self._cursor_tick)
@@ -723,24 +817,56 @@ class RichEdit(tk.Frame):
         finally:
             ReleaseDC(self._hwnd, hdc)
 
+    def _on_map(self, _event=None) -> None:
+        """父窗口重新可见（从最小化恢复、切换虚拟桌面）时立刻把原生控件显出来。
+
+        RichEdit 是独立的 HWND：窗口最小化时系统会把它隐藏，恢复时要等它
+        自己重新 Map 再重绘，实测有 3 帧左右（约 150ms）的窗口期。这段时间
+        父窗口已经画好，而正文区域里什么都没画，露出的就是黑底——这就是
+        「从后台切回来整个内容变黑再重新加载」。
+        主动 ShowWindow + InvalidateRect 可以把这个空档压到 1 帧以内。
+        """
+        if not self._alive or not self._hwnd or self._hidden:
+            return
+        try:
+            ShowWindow(self._hwnd, SW_SHOW)
+            InvalidateRect(self._hwnd, None, False)
+            self._on_configure()
+            self._raise_to_top()
+        except Exception:
+            LOG.exception("恢复原生控件失败")
+
     def _on_configure(self, _event=None) -> None:
         if not self._alive or not self._hwnd:
             return
         width = max(10, self.winfo_width())
         height = max(10, self.winfo_height())
         left, top, right, bottom = self._inset
+        geometry = (left, top, max(4, width - left - right), max(4, height - top - bottom))
+        # 尺寸没变就不要动原生窗口。窗口从后台恢复时 Tk 会连发好几次
+        # <Configure>，每次都 SetWindowPos 会让 RichEdit 反复 WM_SIZE 重排，
+        # 重排期间客户区是未绘制状态，视觉上就是正文整块黑一帧。
+        if geometry == self._last_geometry:
+            return
+        self._last_geometry = geometry
+        # 只改位置和尺寸，不要碰 z 序。
         SetWindowPos(
             self._hwnd,
             HWND_TOP,
-            left,
-            top,
-            max(4, width - left - right),
-            max(4, height - top - bottom),
-            SWP_NOACTIVATE,
+            geometry[0],
+            geometry[1],
+            geometry[2],
+            geometry[3],
+            SWP_NOACTIVATE | SWP_NOZORDER,
         )
 
     def _raise_to_top(self) -> None:
         if not self._hwnd or self._hidden:
+            return
+        # 只在确实被别的同级窗口盖住时才动 z 序。无条件 HWND_TOP 会让控件在
+        # 每次 <Map>/焦点变化时重新参与合成，从后台切回窗口能看到正文先黑一帧。
+        prev = GetWindow(self._hwnd, GW_HWNDPREV)
+        if not (prev and IsWindowVisible(prev)):
             return
         SetWindowPos(
             self._hwnd,

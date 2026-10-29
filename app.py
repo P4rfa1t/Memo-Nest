@@ -28,7 +28,7 @@ except ImportError as exc:  # pragma: no cover
 from core import autostart, backup, hello, onedrive, shortcut, winstyle
 from core import config as cfgmod
 from core.markdown import MarkdownView
-from core.richedit import RichEdit
+from core.richedit import RichEdit, install_repaint_guard
 from core.storage import Note, Store, fmt_time
 from core.vault import Vault, VaultStore
 
@@ -210,6 +210,7 @@ class MemoApp(ctk.CTk):
         self._build_ui()
         self._bind_shortcuts()
         self._restore_window()
+        self._repaint_guard = install_repaint_guard(self, PALETTE["bg"])
         self.after(150, self._apply_native_style)
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -243,7 +244,10 @@ class MemoApp(ctk.CTk):
     # 私密库面板：所有交互都在主窗口内完成
     # ------------------------------------------------------------------
     def open_vault_panel(self, mode: str = "unlock", intent: tuple | None = None) -> None:
-        self._close_vault_panel()
+        # 面板是常驻复用的：已经在显示（比如解锁后又切到改密码）时不要先 lower()
+        # 再 lift()，那会白白触发两次 Tk 重排，实测每次 7~27ms。
+        if getattr(self, "_vault_panel", None) is None:
+            self._close_vault_panel()
         if self.vault is None:
             mode = "create"
         self._vault_mode = mode
@@ -1076,6 +1080,12 @@ class MemoApp(ctk.CTk):
             text_color=p["fg"],
         )
         self.library_tabs.set("便签")
+        # CTkSegmentedButton.set() 每次都要把 4 个按钮全部重绘（实测 25~30ms），
+        # 而同一切换流程里这个值常被反复设置同一个内容。包一层幂等的 setter：
+        # 值没变就直接返回，省掉整轮重绘。
+        self._library_tab_value = "便签"
+        self._library_tabs_raw_set = self.library_tabs.set
+        self.library_tabs.set = self._set_library_tab
         self.library_tabs.grid(row=0, column=1, sticky="w", padx=(7, 0))
 
         actions = ctk.CTkFrame(header, fg_color="transparent", corner_radius=0)
@@ -1388,6 +1398,26 @@ class MemoApp(ctk.CTk):
         ]
         self._native_blocked = False
         self._guard_after = self.after(400, self._guard_native_input)
+
+    def _set_library_tab(self, value) -> None:
+        """幂等的库标签 setter。
+
+        CTkSegmentedButton.set() 会把 4 个按钮全部重绘，实测 25~30ms；
+        而一次库切换流程里这个值常被连着设置好几次（_switch_library 里设一次、
+        _on_library_tab 里又设一次、open_vault_panel 之后再设一次）。
+        值没变就直接返回。
+        """
+        value = str(value)
+        if value == getattr(self, "_library_tab_value", None):
+            return
+        self._library_tab_value = value
+        raw = getattr(self, "_library_tabs_raw_set", None)
+        if raw is None:
+            return
+        try:
+            raw(value)
+        except tk.TclError:
+            pass
 
     def _strip_button(self, parent, text: str, command) -> ctk.CTkButton:
         button = ctk.CTkButton(
@@ -2315,6 +2345,12 @@ class MemoApp(ctk.CTk):
             except tk.TclError:
                 pass
             self._guard_after = None
+        if getattr(self, "_repaint_guard", None) is not None:
+            try:
+                self._repaint_guard.dispose()
+            except Exception:
+                LOG.exception("卸载重绘保护失败")
+            self._repaint_guard = None
         self.destroy()
 
     def _exit_backup(self) -> None:
