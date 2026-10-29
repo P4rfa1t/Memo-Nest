@@ -68,6 +68,8 @@
 - **备份策略**：手动、定时（分钟）、退出前自动备份
 - **开机自启**：写入当前用户注册表 `Run` 项，可在设置中开关
 - **安装版**：PyInstaller onedir + Inno Setup，开始菜单 / 桌面快捷方式、卸载程序；GitHub Actions 自动编译并发布 Release
+- **中文输入**：正文、标题、标签、搜索都用 Windows 原生 RichEdit（TSF），
+  拼音等输入法使用系统现代候选窗，支持云候选、表情与完整的 win32 输入法行为
 - **本地优先**：普通便签就是 `data/notes/*.md`，任何编辑器都能打开
 
 ## 环境要求
@@ -157,8 +159,8 @@ powershell -ExecutionPolicy Bypass -File .\installer\build_installer.ps1 -Build
 - 推送 `v*` 标签时额外创建 Release 并附上安装包：
 
 ```powershell
-git tag v1.1.0
-git push origin v1.1.0
+git tag v1.2.0
+git push origin v1.2.0
 ```
 
 ## 界面

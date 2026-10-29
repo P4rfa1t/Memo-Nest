@@ -26,6 +26,7 @@ except ImportError as exc:  # pragma: no cover
 from core import autostart, backup, hello, onedrive, shortcut, winstyle
 from core import config as cfgmod
 from core.markdown import MarkdownView
+from core.richedit import RichEdit
 from core.storage import Note, Store, fmt_time
 from core.vault import Vault, VaultStore
 
@@ -184,6 +185,7 @@ class MemoApp(ctk.CTk):
         self._settings_cache = None
         self._trash_panel = None
         self._modal_depth = 0
+        self._modal_top = None
 
         self.font_ui = ctk.CTkFont(family=FONT_FAMILY, size=13)
         self.font_small = ctk.CTkFont(family=FONT_FAMILY, size=12)
@@ -246,6 +248,7 @@ class MemoApp(ctk.CTk):
         panel.lift()
         panel.bind("<Escape>", lambda _e: self._cancel_vault_panel())
         self._vault_panel = panel
+        self._apply_native_guard()
 
         card = ctk.CTkFrame(
             panel,
@@ -568,6 +571,7 @@ class MemoApp(ctk.CTk):
                 panel.destroy()
             except tk.TclError:
                 pass
+        self._apply_native_guard()
 
     def create_vault(self, password: str) -> tuple[bool, str]:
         if self.vault is not None:
@@ -781,6 +785,15 @@ class MemoApp(ctk.CTk):
         self._menu: MenuOverlay | None = None
         self.after(60, self._prewarm_menu)
 
+    def _dismiss_menu(self) -> None:
+        """点正文等原生控件时，顺手收起还开着的「⋯」菜单。"""
+        menu = getattr(self, "_menu", None)
+        if menu is not None:
+            try:
+                menu.close()
+            except Exception:
+                LOG.exception("关闭菜单失败")
+
     def show_menu(self) -> None:
         if self._menu is not None:
             self._menu.close()
@@ -791,6 +804,91 @@ class MemoApp(ctk.CTk):
             self._menu_cache[self.library] = overlay
         self._menu = overlay
         overlay.open()
+
+    def _scaled_px(self, value: int) -> int:
+        """把设计稿里的像素值换算成当前 DPI 下的实际像素。"""
+        try:
+            scale = ctk.ScalingTracker.get_widget_scaling(self)
+            return max(1, int(round(value * scale)))
+        except Exception:
+            return value
+
+    def _focus_editor(self) -> None:
+        self.editor.focus_set()
+
+    def _editor_escape(self) -> None:
+        # 原生控件拿到焦点时，Tk 侧收不到按键；Esc 直接交给最上层的面板 / 卡片。
+        if self._settings_panel is not None:
+            cancel = getattr(self._settings_panel, "_cancel", None)
+            if cancel is not None:
+                cancel()
+            else:  # pragma: no cover - 兜底
+                self.close_settings()
+            return
+        if self._trash_panel is not None:
+            self.close_trash()
+            return
+        if self._vault_panel is not None:
+            self._cancel_vault_panel()
+            return
+        if self._modal_top is not None:
+            handler = getattr(self._modal_top, "_on_escape", None)
+            if handler is not None:
+                handler()
+                return
+        try:
+            self.event_generate("<Escape>")
+        except tk.TclError:  # pragma: no cover - 窗口已关闭
+            pass
+
+    def _guard_native_input(self) -> None:
+        """面板或卡片显示期间禁用原生输入框，关闭后恢复。"""
+        self._apply_native_guard()
+        self._guard_after = self.after(200, self._guard_native_input)
+
+    def _apply_native_guard(self) -> None:
+        blocked = bool(
+            self._settings_panel is not None
+            or self._trash_panel is not None
+            or self._vault_panel is not None
+            or self._modal_depth
+        )
+        if blocked != self._native_blocked:
+            self._native_blocked = blocked
+            widgets = list(getattr(self, "_native_inputs", ()))
+            for widget in widgets:
+                widget.set_input_enabled(not blocked)
+            if blocked:
+                # 控件被禁用后键盘焦点悬空，把它交给 Tk 顶层，
+                # 这样面板自己的 Esc 绑定才能收到按键。
+                try:
+                    self.focus_force()
+                except tk.TclError:
+                    pass
+            elif not any(w.has_focus() for w in widgets):
+                try:
+                    self.editor.focus_set()
+                except tk.TclError:
+                    pass
+
+    def _on_editor_shortcut(self, action: str) -> None:
+        """RichEdit 收到焦点时，Tk 的 bind_all 收不到按键，由这里转发。"""
+        actions = {
+            "new": self.new_note,
+            "save": lambda: self.save_current(force=True),
+            "find": self.focus_search,
+            "delete": self.delete_note,
+            "refresh": self.refresh_list,
+            "preview": self.toggle_preview,
+            "settings": self.open_settings,
+            "lock": self.lock_vault,
+            "backup": self.start_backup,
+            "mode0": lambda: self.show_mode(0),
+            "mode1": lambda: self.show_mode(1),
+        }
+        callback = actions.get(action)
+        if callback is not None:
+            self._shortcut(callback)
 
     def _bind_shortcuts(self) -> None:
         self.bind_all("<Control-n>", lambda _e: self._shortcut(self.new_note))
@@ -805,12 +903,6 @@ class MemoApp(ctk.CTk):
         self.bind_all("<Control-l>", lambda _e: self._shortcut(self.lock_vault))
         self.bind_all("<F5>", lambda _e: self._shortcut(self.start_backup))
 
-        self.editor.bind("<Control-z>", lambda _e: self._undo())
-        self.editor.bind("<Control-y>", lambda _e: self._redo())
-        self.editor.bind("<Control-Z>", lambda _e: self._redo())
-        self.editor.bind("<Tab>", self._insert_tab)
-        self.editor.bind("<Button-3>", self._show_editor_menu)
-
     def _shortcut(self, callback):
         # 设置页或提示卡片打开时，不让全局快捷键操作背后的便签
         if self._settings_panel is not None or self._trash_panel is not None or self._modal_depth:
@@ -818,24 +910,21 @@ class MemoApp(ctk.CTk):
         callback()
         return "break"
 
-    def _editor_action(self, event_name: str) -> str:
-        widget = self.preview if self._preview_mode else self.editor
-        widget.event_generate(event_name)
+    def _editor_action(self, action: str) -> str:
+        method = getattr(self.editor, action, None)
+        if method is not None:
+            method()
+            if action in ("cut", "paste"):
+                self._mark_dirty()
         return "break"
 
     def _undo(self) -> str:
-        try:
-            self.editor.edit_undo()
-        except tk.TclError:
-            pass
+        self.editor.undo()
         self._mark_dirty()
         return "break"
 
     def _redo(self) -> str:
-        try:
-            self.editor.edit_redo()
-        except tk.TclError:
-            pass
+        self.editor.redo()
         self._mark_dirty()
         return "break"
 
@@ -975,24 +1064,39 @@ class MemoApp(ctk.CTk):
         self.search_row = ctk.CTkFrame(top, fg_color="transparent", corner_radius=0)
         self.search_row.grid(row=2, column=0, sticky="ew", pady=(7, 0))
         self.search_row.columnconfigure(0, weight=1)
-        self.search_var = tk.StringVar()
-        self.search_var.trace_add("write", self._on_search_change)
-        self.search_entry = ctk.CTkEntry(
+        search_shell = ctk.CTkFrame(
             self.search_row,
-            textvariable=self.search_var,
-            placeholder_text="搜索便签，回车打开…",
-            height=28,
+            fg_color=p["card"],
             corner_radius=8,
             border_width=1,
             border_color=p["border"],
-            fg_color=p["card"],
-            text_color=p["fg"],
-            placeholder_text_color=p["muted"],
-            font=self.font_small,
+            height=28,
         )
-        self.search_entry.grid(row=0, column=0, sticky="ew")
-        self.search_entry.bind("<Return>", self._on_search_return)
-        self.search_entry.bind("<Escape>", lambda _e: self._hide_search())
+        search_shell.grid(row=0, column=0, sticky="ew")
+        search_shell.grid_propagate(False)
+        self.search_entry = RichEdit(
+            search_shell,
+            font_family=FONT_FAMILY,
+            font_size=12,
+            fg=p["fg"],
+            bg=p["card"],
+            placeholder="搜索便签，回车打开…",
+            placeholder_color=p["muted"],
+            multiline=False,
+            height=self._scaled_px(26),
+            inset=(
+                self._scaled_px(6),
+                self._scaled_px(4),
+                self._scaled_px(6),
+                self._scaled_px(4),
+            ),
+            on_change=self._on_search_change,
+            on_enter=self._on_search_return,
+            on_tab=self._focus_editor,
+            on_escape=self._hide_search,
+            on_shortcut=self._on_editor_shortcut,
+        )
+        self.search_entry.pack(fill="both", expand=True)
         ctk.CTkButton(
             self.search_row,
             text="Esc",
@@ -1013,21 +1117,25 @@ class MemoApp(ctk.CTk):
         body.columnconfigure(0, weight=1)
         body.rowconfigure(3, weight=1)
 
-        self.title_var = tk.StringVar()
-        self.title_entry = ctk.CTkEntry(
+        self.title_entry = RichEdit(
             body,
-            textvariable=self.title_var,
-            placeholder_text="标题",
-            font=self.font_title,
-            height=42,
-            corner_radius=0,
-            border_width=0,
-            fg_color="transparent",
-            text_color=p["fg"],
-            placeholder_text_color="#C9BC8C",
+            font_family=FONT_FAMILY,
+            font_size=20,
+            bold=True,
+            fg=p["fg"],
+            bg=p["bg"],
+            placeholder="标题",
+            placeholder_color="#C9BC8C",
+            multiline=False,
+            height=self._scaled_px(42),
+            inset=(0, self._scaled_px(6), 0, self._scaled_px(4)),
+            on_change=self._on_field_change,
+            on_enter=self._focus_editor,
+            on_tab=self._focus_editor,
+            on_escape=self._editor_escape,
+            on_shortcut=self._on_editor_shortcut,
         )
         self.title_entry.grid(row=0, column=0, sticky="ew", pady=(6, 0))
-        self.title_entry.bind("<Return>", lambda _e: self.editor.focus_set())
 
         meta = ctk.CTkFrame(body, fg_color="transparent", corner_radius=0)
         meta.grid(row=1, column=0, sticky="ew")
@@ -1035,18 +1143,22 @@ class MemoApp(ctk.CTk):
         ctk.CTkLabel(meta, text="#", font=self.font_small, text_color=p["muted"], width=12).grid(
             row=0, column=0, sticky="w", padx=(2, 4)
         )
-        self.tags_var = tk.StringVar()
-        self.tags_entry = ctk.CTkEntry(
+        self.tags_entry = RichEdit(
             meta,
-            textvariable=self.tags_var,
-            placeholder_text="添加标签，用逗号分隔",
-            height=24,
-            corner_radius=0,
-            border_width=0,
-            fg_color="transparent",
-            text_color=p["muted"],
-            placeholder_text_color="#C9BC8C",
-            font=self.font_tiny,
+            font_family=FONT_FAMILY,
+            font_size=11,
+            fg=p["muted"],
+            bg=p["bg"],
+            placeholder="添加标签，用逗号分隔",
+            placeholder_color="#C9BC8C",
+            multiline=False,
+            height=self._scaled_px(24),
+            inset=(0, self._scaled_px(3), 0, self._scaled_px(3)),
+            on_change=self._on_field_change,
+            on_enter=self._focus_editor,
+            on_tab=self._focus_editor,
+            on_escape=self._editor_escape,
+            on_shortcut=self._on_editor_shortcut,
         )
         self.tags_entry.grid(row=0, column=1, sticky="ew")
         self.meta_label = ctk.CTkLabel(
@@ -1086,17 +1198,20 @@ class MemoApp(ctk.CTk):
             spacing1=2,
             spacing3=4,
         )
-        self.editor = tk.Text(
+        self.editor = RichEdit(
             text_wrap,
-            undo=True,
-            maxundo=-1,
-            font=(FONT_FAMILY, 12),
-            tabs=("2c",),
-            **text_options,
+            font_family=FONT_FAMILY,
+            font_size=12,
+            fg=p["fg"],
+            bg=p["card"],
+            multiline=True,
+            on_change=self._on_editor_change,
+            on_escape=self._editor_escape,
+            on_context=self._show_editor_menu,
+            on_shortcut=self._on_editor_shortcut,
+            on_click=self._dismiss_menu,
         )
         self.editor.grid(row=0, column=0, sticky="nsew")
-        self.editor.bind("<<Modified>>", self._on_modified)
-        self.editor.bind("<KeyRelease>", lambda _e: self._schedule_stats())
 
         self.preview = tk.Text(text_wrap, **text_options)
         md_palette = {
@@ -1122,7 +1237,7 @@ class MemoApp(ctk.CTk):
             button_hover_color="#DDC885",
         )
         self.edit_scroll.grid(row=0, column=1, sticky="ns", padx=(4, 0))
-        self.editor.configure(yscrollcommand=self.edit_scroll.set)
+        self.editor.set_yscrollcommand(self.edit_scroll.set)
 
         self.preview_scroll = ctk.CTkScrollbar(
             text_wrap,
@@ -1149,6 +1264,17 @@ class MemoApp(ctk.CTk):
             bottom, text="0 字 · 0 行", font=self.font_tiny, text_color=p["muted"], anchor="e"
         )
         self.stats_label.grid(row=0, column=1, sticky="e", padx=(0, 2))
+
+        # 面板 / 卡片盖住正文时，原生输入控件必须一起禁掉，
+        # 否则按键会绕过面板直接落到便签里。
+        self._native_inputs = [
+            self.search_entry,
+            self.title_entry,
+            self.tags_entry,
+            self.editor,
+        ]
+        self._native_blocked = False
+        self._guard_after = self.after(400, self._guard_native_input)
 
     def _strip_button(self, parent, text: str, command) -> ctk.CTkButton:
         button = ctk.CTkButton(
@@ -1213,7 +1339,8 @@ class MemoApp(ctk.CTk):
                 self.note_combo.set("")
             return []
         self._refreshing = True
-        notes = self.store.filter(self.search_var.get() if hasattr(self, "search_var") else "")
+        query = self.search_entry.get_text() if hasattr(self, "search_entry") else ""
+        notes = self.store.filter(query)
         self._combo_notes = notes
         self._sync_combo()
         self._refreshing = False
@@ -1255,12 +1382,9 @@ class MemoApp(ctk.CTk):
     def load_note(self, note: Note) -> None:
         self._loading = True
         self.current = note
-        self.title_var.set(note.title)
-        self.tags_var.set(", ".join(note.tags))
-        self.editor.delete("1.0", "end")
-        self.editor.insert("1.0", note.content)
-        self.editor.edit_reset()
-        self.editor.edit_modified(False)
+        self.title_entry.set_text(note.title)
+        self.tags_entry.set_text(", ".join(note.tags))
+        self.editor.set_text(note.content)
         self.editor.mark_set("insert", "1.0")
         self.editor.yview_moveto(0)
         self._dirty = False
@@ -1274,10 +1398,9 @@ class MemoApp(ctk.CTk):
     def _clear_editor(self) -> None:
         self._loading = True
         self.current = None
-        self.title_var.set("")
-        self.tags_var.set("")
-        self.editor.delete("1.0", "end")
-        self.editor.edit_modified(False)
+        self.title_entry.set_text("")
+        self.tags_entry.set_text("")
+        self.editor.set_text("")
         self._dirty = False
         self._update_meta()
         self._update_stats()
@@ -1365,7 +1488,7 @@ class MemoApp(ctk.CTk):
         self.search_row.grid()
         self._update_search_button(True)
         self.search_entry.focus_set()
-        self.search_entry.select_range(0, "end")
+        self.search_entry.select_all()
 
     def _on_search_change(self, *_args) -> None:
         if self._search_job:
@@ -1386,13 +1509,13 @@ class MemoApp(ctk.CTk):
     def _on_search_return(self, _event=None) -> str:
         if self.store is None:
             return "break"
-        notes = self.store.filter(self.search_var.get())
+        notes = self.store.filter(self.search_entry.get_text())
         if notes:
             self._hide_search(load=notes[0])
         return "break"
 
     def _hide_search(self, load: Note | None = None) -> None:
-        self.search_var.set("")
+        self.search_entry.set_text("")
         if self._search_job:
             try:
                 self.after_cancel(self._search_job)
@@ -1411,25 +1534,13 @@ class MemoApp(ctk.CTk):
     # ------------------------------------------------------------------
     # 保存
     # ------------------------------------------------------------------
-    def _on_modified(self, _event=None) -> None:
-        if not self.editor.edit_modified():
-            return
+    def _on_editor_change(self) -> None:
         if self._loading:
-            self.editor.edit_modified(False)
             return
-        # 拼音输入法在组合过程中也会触发 <<Modified>>，立刻改标记会打断候选框，
-        # 因此放到空闲时再清掉，输入法有完整的一帧去绘制候选窗口。
-        self.after_idle(self._reset_modified)
         self._mark_dirty()
+        self._schedule_stats()
 
-    def _reset_modified(self) -> None:
-        try:
-            if self.editor.edit_modified():
-                self.editor.edit_modified(False)
-        except tk.TclError:  # pragma: no cover - 窗口已关闭
-            pass
-
-    def _on_field_change(self, _event=None) -> None:
+    def _on_field_change(self) -> None:
         if self._loading:
             return
         self._mark_dirty()
@@ -1482,17 +1593,25 @@ class MemoApp(ctk.CTk):
             return
         if not (self._dirty or force):
             return
-        content = self.editor.get("1.0", "end-1c")
-        title = self.title_var.get().strip()
+        content = self.editor.get_text()
+        title = self.title_entry.get_text().strip()
         if not title or title in ("未命名笔记", "无标题"):
             title = self._derive_title(content)
         self.current.title = title or "未命名笔记"
         self.current.content = content
-        self.current.tags = self._parse_tags(self.tags_var.get())
+        self.current.tags = self._parse_tags(self.tags_entry.get_text())
         self.store.save(self.current)
-        self._dirty = False
+        if self.editor.get_text() == content:
+            self._dirty = False
+            self.editor.mark_saved()
+        else:
+            # 保存过程中又输入了内容，保持 dirty，稍后再存一次
+            self._dirty = True
+            self._schedule_save()
         self._last_change = datetime.now()
-        self.title_var.set(self.current.title)
+        # 正在标题框里打拼音时，回写文本会打断输入法的组合，等输入结束再说
+        if not self.title_entry.has_focus():
+            self.title_entry.set_text(self.current.title)
         self._update_meta()
         self._update_stats()
         if refresh:
@@ -1512,7 +1631,7 @@ class MemoApp(ctk.CTk):
     def _set_mode(self, preview: bool) -> None:
         self._preview_mode = bool(preview)
         if self._preview_mode:
-            self.md_view.render(self.editor.get("1.0", "end-1c"))
+            self.md_view.render(self.editor.get_text())
             self.editor.grid_remove()
             self.edit_scroll.grid_remove()
             self.preview.grid(row=0, column=0, sticky="nsew")
@@ -1529,7 +1648,7 @@ class MemoApp(ctk.CTk):
 
     def _render_preview(self) -> None:
         if self._preview_mode:
-            self.md_view.render(self.editor.get("1.0", "end-1c"))
+            self.md_view.render(self.editor.get_text())
 
     def _update_meta(self) -> None:
         self._update_pin_button()
@@ -1539,7 +1658,7 @@ class MemoApp(ctk.CTk):
         self.meta_label.configure(text=f"更新于 {fmt_time(self.current.updated, short=False)}")
 
     def _update_stats(self) -> None:
-        text = self.editor.get("1.0", "end-1c")
+        text = self.editor.get_text()
         chars = len(re.sub(r"\s", "", text))
         lines = text.count("\n") + 1 if text else 0
         self.stats_label.configure(text=f"{chars} 字 · {lines} 行")
@@ -1557,16 +1676,22 @@ class MemoApp(ctk.CTk):
         self._stats_job = None
         self._update_stats()
 
-    def _show_editor_menu(self, event) -> None:
+    def _show_editor_menu(self, x: int, y: int) -> None:
         menu = tk.Menu(self, tearoff=0)
-        menu.add_command(label="剪切", command=lambda: self._editor_action("<<Cut>>"))
-        menu.add_command(label="复制", command=lambda: self._editor_action("<<Copy>>"))
-        menu.add_command(label="粘贴", command=lambda: self._editor_action("<<Paste>>"))
+        menu.add_command(label="撤销", command=self._undo)
+        menu.add_command(label="重做", command=self._redo)
         menu.add_separator()
-        menu.add_command(label="全选", command=lambda: self._editor_action("<<SelectAll>>"))
+        menu.add_command(label="剪切", command=lambda: self._editor_action("cut"))
+        menu.add_command(label="复制", command=lambda: self._editor_action("copy"))
+        menu.add_command(label="粘贴", command=lambda: self._editor_action("paste"))
+        menu.add_separator()
+        menu.add_command(label="全选", command=lambda: self._editor_action("select_all"))
         menu.add_separator()
         menu.add_command(label="插入当前时间", command=self._insert_now)
-        menu.tk_popup(event.x_root, event.y_root)
+        try:
+            menu.tk_popup(x, y)
+        finally:
+            menu.grab_release()
 
     def _insert_now(self) -> None:
         self.editor.insert("insert", datetime.now().strftime("%Y-%m-%d %H:%M"))
@@ -1587,7 +1712,7 @@ class MemoApp(ctk.CTk):
         )
         if not path:
             return
-        Path(path).write_text(self.editor.get("1.0", "end-1c"), encoding="utf-8")
+        Path(path).write_text(self.editor.get_text(), encoding="utf-8")
         self.set_status(f"已导出到 {path}")
 
     # ------------------------------------------------------------------
@@ -1708,10 +1833,12 @@ class MemoApp(ctk.CTk):
                 panel.lift()
                 panel._bind_esc()
                 panel.focus_set()
+                self._apply_native_guard()
                 return
         panel = SettingsPanel(self)
         self._settings_cache = panel
         self._settings_panel = panel
+        self._apply_native_guard()
 
     def close_settings(self) -> None:
         panel = getattr(self, "_settings_panel", None)
@@ -1734,6 +1861,7 @@ class MemoApp(ctk.CTk):
             panel.place_forget()
         except tk.TclError:
             pass
+        self._apply_native_guard()
 
     def show_trash(self) -> None:
         panel = self._trash_panel
@@ -1742,6 +1870,7 @@ class MemoApp(ctk.CTk):
             panel.lift()
             return
         self._trash_panel = TrashPanel(self)
+        self._apply_native_guard()
 
     def close_trash(self) -> None:
         panel = self._trash_panel
@@ -1762,6 +1891,7 @@ class MemoApp(ctk.CTk):
             self.body.focus_set()
         except tk.TclError:
             pass
+        self._apply_native_guard()
 
     def _need_unlock(self) -> None:
         self.show_info("私密笔记库", "请先解锁私密笔记库。")
@@ -1890,6 +2020,12 @@ class MemoApp(ctk.CTk):
                 self.vault.lock()
             except Exception:
                 LOG.exception("锁定私密库失败")
+        if getattr(self, "_guard_after", None) is not None:
+            try:
+                self.after_cancel(self._guard_after)
+            except tk.TclError:
+                pass
+            self._guard_after = None
         self.destroy()
 
     def _exit_backup(self) -> None:
@@ -2075,6 +2211,8 @@ class InWindowDialog(ctk.CTkFrame):
         self._confirm = confirm
         self._esc_bind: str | None = None
         app._modal_depth += 1
+        app._modal_top = self
+        app._apply_native_guard()
 
         self.place(in_=host, relx=0, rely=0, relwidth=1, relheight=1)
         self.lift()
@@ -2208,7 +2346,10 @@ class InWindowDialog(ctk.CTkFrame):
             self._esc_bind = None
         self.result.set(value)
         self.app._modal_depth = max(0, self.app._modal_depth - 1)
+        if self.app._modal_top is self:
+            self.app._modal_top = None
         self.destroy()
+        self.app._apply_native_guard()
 
 
 class TrashPanel(ctk.CTkFrame):
@@ -3363,6 +3504,8 @@ class DeviceCodePanel(ctk.CTkFrame):
         self.place(in_=host, relx=0, rely=0, relwidth=1, relheight=1)
         self.lift()
         app._modal_depth += 1
+        app._modal_top = self
+        app._apply_native_guard()
         self._esc_bind = app.bind(
             "<Escape>", lambda _e: None if self._closed else self._close(), add="+"
         )
@@ -3482,12 +3625,15 @@ class DeviceCodePanel(ctk.CTkFrame):
                 pass
             self._esc_bind = None
         self.app._modal_depth = max(0, self.app._modal_depth - 1)
+        if self.app._modal_top is self:
+            self.app._modal_top = None
         if self.on_closed is not None:
             try:
                 self.on_closed()
             except Exception:
                 pass
         self.destroy()
+        self.app._apply_native_guard()
 
 
 def enable_dpi_awareness() -> None:
