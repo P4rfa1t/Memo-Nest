@@ -206,11 +206,13 @@ class MemoApp(ctk.CTk):
         self.configure(fg_color=PALETTE["bg"])
         self._set_icon()
 
+        # 必须在 _build_ui() 之前装：原生 RichEdit 子窗口构造时会把自己登记
+        # 到这个守卫里，装了之后才建控件就登记不上了。
+        self._repaint_guard = install_repaint_guard(self, PALETTE["bg"])
         self._build_menu()
         self._build_ui()
         self._bind_shortcuts()
         self._restore_window()
-        self._repaint_guard = install_repaint_guard(self, PALETTE["bg"])
         self.after(150, self._apply_native_style)
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
