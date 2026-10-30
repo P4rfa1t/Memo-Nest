@@ -10,10 +10,12 @@ import 'dart:io';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:path/path.dart' as p;
 import 'package:window_manager/window_manager.dart';
 
 import '../app_state.dart';
 import '../core/models.dart';
+import '../core/note_store.dart';
 import 'editor_area.dart';
 import 'markdown_view.dart';
 import 'panels/menu_overlay.dart';
@@ -191,6 +193,7 @@ class _MainWindowState extends State<MainWindow> {
                         _menuOpen = false;
                         _trashOpen = true;
                       }),
+                      onImport: _importNotes,
                       onExport: _exportNote,
                       onOpenDataDir: _openDataDir,
                       onShowHelp: _showHelp,
@@ -208,6 +211,57 @@ class _MainWindowState extends State<MainWindow> {
   }
 
   // ---------- 菜单动作 ----------
+  /// 导入 Markdown：选一个或多个 .md，各自变成一篇便签。
+  ///
+  /// 标题用 guessTitle 猜（第一个标题行，否则第一行前 60 字），
+  /// 猜不出来就退回文件名。正文保持原样——标题和正文在 MemoNest 里
+  /// 本来就分开存，硬把 `# 标题` 那行删掉会破坏原本的 Markdown 结构。
+  Future<void> _importNotes() async {
+    final s = state.store;
+    if (s == null) {
+      state.statusMessage = '数据还没准备好';
+      state.refresh();
+      return;
+    }
+    final files = await openFiles(
+      acceptedTypeGroups: const [
+        XTypeGroup(
+            label: 'Markdown 文件', extensions: ['md', 'markdown', 'txt']),
+        XTypeGroup(label: '所有文件'),
+      ],
+    );
+    if (files.isEmpty) return;
+
+    var done = 0;
+    var failed = 0;
+    String? lastId;
+    for (final file in files) {
+      try {
+        final content = await File(file.path).readAsString(encoding: utf8);
+        final fallback = p.basenameWithoutExtension(file.path);
+        final title = guessTitle(content, fallback);
+        final note = s.create(title: title, content: content);
+        lastId = note.id;
+        done++;
+      } on Exception {
+        failed++;
+      }
+    }
+
+    if (lastId != null) {
+      final imported = s.get(lastId);
+      if (imported != null) state.selectNote(imported);
+    }
+    if (done == 0) {
+      state.statusMessage = '导入失败';
+    } else if (failed == 0) {
+      state.statusMessage = done == 1 ? '已导入 1 篇便签' : '已导入 $done 篇便签';
+    } else {
+      state.statusMessage = '已导入 $done 篇，$failed 篇失败';
+    }
+    state.refresh();
+  }
+
   Future<void> _exportNote() async {
     final note = state.current;
     if (note == null) return;

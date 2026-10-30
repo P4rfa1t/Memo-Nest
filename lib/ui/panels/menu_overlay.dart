@@ -1,6 +1,6 @@
 /// 「⋯」菜单：自绘卡片，条目按当前库动态生成。
 ///
-/// 条目顺序对齐 Python 版 `_build_menu`：设置 → 库操作 → 导出/数据文件夹 →
+/// 条目顺序对齐 Python 版 `_build_menu`：设置 → 库操作 → 导入/导出/数据文件夹 →
 /// 删除 → 回收站 → 使用说明/关于 → 退出。
 library;
 
@@ -23,6 +23,7 @@ class MenuOverlay extends StatelessWidget {
   final VoidCallback onClose;
   final VoidCallback onOpenSettings;
   final VoidCallback onOpenTrash;
+  final VoidCallback onImport;
   final VoidCallback onExport;
   final VoidCallback onOpenDataDir;
   final VoidCallback onShowHelp;
@@ -36,6 +37,7 @@ class MenuOverlay extends StatelessWidget {
     required this.onClose,
     required this.onOpenSettings,
     required this.onOpenTrash,
+    required this.onImport,
     required this.onExport,
     required this.onOpenDataDir,
     required this.onShowHelp,
@@ -68,6 +70,11 @@ class MenuOverlay extends StatelessWidget {
           state.moveCurrentBetweenLibraries();
         })),
       const _Item.separator(),
+      // 导入不看 hasNote：空库一样能导入，导完自然就有便签了。
+      _Item.action(MenuAction('导入 Markdown…', () {
+        onClose();
+        onImport();
+      })),
       _Item.action(
           MenuAction('导出为 Markdown…', () {
             onClose();
