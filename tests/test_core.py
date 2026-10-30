@@ -157,6 +157,20 @@ print("hi")
         self.assertEqual(table.header, ["a", "b"])
         self.assertEqual(table.rows, [["1", "2"]])
 
+    def test_image_block(self) -> None:
+        blocks = parse_blocks("前文\n\n![截图](assets/a.png)\n\n后文")
+        self.assertEqual([b.kind for b in blocks], ["paragraph", "image", "paragraph"])
+        self.assertEqual(blocks[1].text, "截图")
+        self.assertEqual(blocks[1].src, "assets/a.png")
+
+        # 带标题的写法也算图片块
+        titled = parse_blocks('![图](assets/b.png "说明")')[0]
+        self.assertEqual((titled.kind, titled.src), ("image", "assets/b.png"))
+
+        # 与正文混排的图片不单独成块
+        mixed = parse_blocks("看图 ![图](c.png) 就知道了")[0]
+        self.assertEqual(mixed.kind, "paragraph")
+
     def test_inline_styles(self) -> None:
         spans = parse_inline("**粗** *斜* `代码` [链接](https://example.com) ~~删~~")
         text = "".join(span.text for span in spans)

@@ -73,6 +73,9 @@
 - **界面即时切换**：设置、回收站、私密库面板常驻复用，显示与隐藏只在 `lift()` /
   `lower()` 之间切换，不重建控件；设置分页叠放在同一格里靠 `tkraise()` 切换；
   这些面板与预览区都在启动后真正空闲时才预热，打字期间不抢输入法的帧
+- **粘贴图片**：右键菜单「粘贴图片」或 `Ctrl+Shift+V` 把剪贴板里的位图存成
+  `data/notes/assets/*.png`，正文插入 `![说明](assets/xxx.png)`，预览里直接显示；
+  PNG 由内置编码器生成，不依赖 Pillow
 - **本地优先**：普通便签就是 `data/notes/*.md`，任何编辑器都能打开
 
 ## 环境要求
@@ -162,8 +165,8 @@ powershell -ExecutionPolicy Bypass -File .\installer\build_installer.ps1 -Build
 - 推送 `v*` 标签时额外创建 Release 并附上安装包：
 
 ```powershell
-git tag v1.3.2
-git push origin v1.3.2
+git tag v1.4.0
+git push origin v1.4.0
 ```
 
 ## 界面

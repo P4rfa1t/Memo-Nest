@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 APP_NAME = "MemoNest 备忘录"
-APP_VERSION = "1.3.2"
+APP_VERSION = "1.4.0"
 
 FROZEN = bool(getattr(sys, "frozen", False))
 

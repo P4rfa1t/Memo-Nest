@@ -694,6 +694,17 @@ class MemoApp(ctk.CTk):
         self._build_menu()
         return True, ""
 
+    def _on_library_tab_click(self, value: str) -> None:
+        """子按钮的直接点击回调，会和 CTkSegmentedButton 的 command 各触发一次。
+
+        值真的变了时，command 里已经把切换做完，这里再调一次会被
+        「target == self.library」挡住，代价只有一次 no-op；值没变时
+        command 根本不触发，这里就是唯一入口。
+        """
+        if value == "私密" and self.library == "vault" and self._vault_ready():
+            return  # 已经在私密库里，不用再解锁
+        self._on_library_tab(value)
+
     def _on_library_tab(self, value: str) -> None:
         target = "vault" if value == "私密" else "notes"
         if self._vault_panel is not None and target == "notes":
@@ -1003,6 +1014,7 @@ class MemoApp(ctk.CTk):
             "backup": self.start_backup,
             "mode0": lambda: self.show_mode(0),
             "mode1": lambda: self.show_mode(1),
+            "paste_image": self.paste_image,
         }
         callback = actions.get(action)
         if callback is not None:
@@ -1019,6 +1031,7 @@ class MemoApp(ctk.CTk):
         self.bind_all("<Control-e>", lambda _e: self._shortcut(self.toggle_preview))
         self.bind_all("<Control-comma>", lambda _e: self._shortcut(self.open_settings))
         self.bind_all("<Control-l>", lambda _e: self._shortcut(self.lock_vault))
+        self.bind_all("<Control-Shift-V>", lambda _e: self._shortcut(self.paste_image))
         self.bind_all("<F5>", lambda _e: self._shortcut(self.start_backup))
 
     def _shortcut(self, callback):
@@ -1088,6 +1101,21 @@ class MemoApp(ctk.CTk):
         self._library_tab_value = "便签"
         self._library_tabs_raw_set = self.library_tabs.set
         self.library_tabs.set = self._set_library_tab
+        # CTkButton 的 command 走 set(v, from_button_callback=True)，而 set() 开头
+        # 就是 `if value == self._current_value: return`——已经在「私密」标签上时
+        # 再点「私密」（比如私密库锁着、想重新解锁）根本不会回调，看起来就是
+        # 「点不动」。给每个子按钮补一个直接点击绑定，绕过这个值比较。
+        try:
+            for value, button in self.library_tabs._buttons_dict.items():
+                button.bind(
+                    "<Button-1>",
+                    lambda _e, v=value: self.after_idle(
+                        lambda: self._on_library_tab_click(v)
+                    ),
+                    add="+",
+                )
+        except Exception:
+            LOG.exception("给库标签补点击绑定失败")
         self.library_tabs.grid(row=0, column=1, sticky="w", padx=(7, 0))
 
         actions = ctk.CTkFrame(header, fg_color="transparent", corner_radius=0)
@@ -1348,7 +1376,12 @@ class MemoApp(ctk.CTk):
             "code_fg": p["code_fg"],
             "border": p["border"],
         }
-        self.md_view = MarkdownView(self.preview, md_palette, base_size=10)
+        self.md_view = MarkdownView(
+            self.preview,
+            md_palette,
+            base_size=10,
+            base_dir=getattr(self.plain_store, "notes_dir", None),
+        )
         self.preview.grid_remove()
 
         self.edit_scroll = ctk.CTkScrollbar(
@@ -1401,13 +1434,15 @@ class MemoApp(ctk.CTk):
         self._native_blocked = False
         self._guard_after = self.after(400, self._guard_native_input)
 
-    def _set_library_tab(self, value) -> None:
+    def _set_library_tab(self, value, **_kwargs) -> None:
         """幂等的库标签 setter。
 
         CTkSegmentedButton.set() 会把 4 个按钮全部重绘，实测 25~30ms；
         而一次库切换流程里这个值常被连着设置好几次（_switch_library 里设一次、
         _on_library_tab 里又设一次、open_vault_panel 之后再设一次）。
         值没变就直接返回。
+
+        CTk 内部回调会带 from_button_callback=True 关键字，这里一并吞掉。
         """
         value = str(value)
         if value == getattr(self, "_library_tab_value", None):
@@ -1831,6 +1866,7 @@ class MemoApp(ctk.CTk):
         editor = self.editor
         has_selection = editor.has_selection()
         can_paste = editor.can_paste()
+        can_paste_image = editor.can_paste_image()
         items = [
             ("撤销", "Ctrl+Z", self._undo if editor.can_undo() else None),
             ("重做", "Ctrl+Y", self._redo if editor.can_redo() else None),
@@ -1838,12 +1874,46 @@ class MemoApp(ctk.CTk):
             ("剪切", "Ctrl+X", (lambda: self._editor_action("cut")) if has_selection else None),
             ("复制", "Ctrl+C", (lambda: self._editor_action("copy")) if has_selection else None),
             ("粘贴", "Ctrl+V", (lambda: self._editor_action("paste")) if can_paste else None),
+            (
+                "粘贴图片",
+                "Ctrl+Shift+V",
+                self.paste_image if can_paste_image else None,
+            ),
             (None, "", None),
             ("全选", "Ctrl+A", lambda: self._editor_action("select_all")),
             (None, "", None),
             ("插入当前时间", "", self._insert_now),
         ]
         self._editor_menu = ContextMenu(self, items, x, y)
+
+    def paste_image(self) -> None:
+        """把剪贴板里的图片存到便签目录的 assets/ 下，再插入 Markdown 引用。"""
+        from core.images import save_clipboard_image
+        from core.richedit import clipboard_bitmap_bytes
+
+        if self.current is None:
+            self.show_info("粘贴图片", "请先选择一条便签。")
+            return
+        bitmap = clipboard_bitmap_bytes(self.editor._hwnd)
+        if bitmap is None:
+            self.set_status("剪贴板里没有可粘贴的图片")
+            return
+        notes_dir = getattr(self.store, "notes_dir", None)
+        if notes_dir is None:
+            self.show_warning("粘贴图片", "当前便签库不支持保存图片。")
+            return
+        try:
+            stem = re.sub(r'[\\/:*?"<>|\s]+', "-", (self.current.title or "note")).strip("-")
+            stem = (stem or "note")[:40]
+            rel, target = save_clipboard_image(bitmap, notes_dir, stem)
+        except Exception as exc:
+            LOG.exception("保存剪贴板图片失败")
+            self.show_warning("粘贴图片", f"保存图片失败：{exc}")
+            return
+        alt = (self.current.title or "图片").replace("]", ")")
+        self.editor.insert("insert", f"\n![{alt}]({rel})\n")
+        self._mark_dirty()
+        self.set_status(f"已插入图片 {target.name}（{bitmap[0]}×{bitmap[1]}）")
 
     def _insert_now(self) -> None:
         self.editor.insert("insert", datetime.now().strftime("%Y-%m-%d %H:%M"))

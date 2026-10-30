@@ -310,6 +310,67 @@ GlobalUnlock = kernel32.GlobalUnlock
 GlobalUnlock.argtypes = [wintypes.HGLOBAL]
 
 CF_UNICODETEXT = 13
+CF_DIB = 8
+CF_DIBV5 = 17
+
+
+class BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [
+        ("biSize", wintypes.DWORD),
+        ("biWidth", LONG),
+        ("biHeight", LONG),
+        ("biPlanes", wintypes.WORD),
+        ("biBitCount", wintypes.WORD),
+        ("biCompression", wintypes.DWORD),
+        ("biSizeImage", wintypes.DWORD),
+        ("biXPelsPerMeter", LONG),
+        ("biYPelsPerMeter", LONG),
+        ("biClrUsed", wintypes.DWORD),
+        ("biClrImportant", wintypes.DWORD),
+    ]
+
+
+def clipboard_bitmap_bytes(hwnd: int) -> bytes | None:
+    """把剪贴板里的位图读成 BGR 原始像素 + 尺寸。
+
+    返回 (width, height, bpp, data) 的元组，data 为上到下的 BGRX/BGR 行。
+    直接吃 CF_DIB 的 BITMAPINFOHEADER，跳过调色板和 V5 头部，只保留最常见的
+    24/32 位情况——截图工具和浏览器复制的图片基本都是这两种。
+    """
+    if not OpenClipboard(hwnd):
+        return None
+    try:
+        handle = None
+        for fmt in (CF_DIB, CF_DIBV5):
+            handle = GetClipboardData(fmt)
+            if handle:
+                break
+        if not handle:
+            return None
+        pointer = GlobalLock(handle)
+        if not pointer:
+            return None
+        try:
+            header = BITMAPINFOHEADER.from_address(pointer)
+            if header.biBitCount not in (24, 32) or header.biCompression not in (0, 3):
+                return None
+            width = int(header.biWidth)
+            height = int(header.biHeight)
+            topdown = height < 0
+            height = abs(height)
+            stride = ((width * header.biBitCount + 31) // 32) * 4
+            # biSize 可能被某些来源写错，保险起见按 40 字节标准头算偏移。
+            offset = pointer + 40
+            size = stride * height
+            raw = ctypes.string_at(offset, size)
+            if topdown:
+                rows = [raw[i : i + stride] for i in range(0, size, stride)]
+                raw = b"".join(reversed(rows))
+            return (width, height, header.biBitCount, raw)
+        finally:
+            GlobalUnlock(handle)
+    finally:
+        CloseClipboard()
 
 
 class RECT(ctypes.Structure):
@@ -811,6 +872,10 @@ class RichEdit(tk.Frame):
             return True
 
         if ctrl and not alt:
+            # Ctrl+Shift+V：粘贴剪贴板里的图片（Ctrl+V 仍是纯文本粘贴）。
+            if shift and vk == ord("V"):
+                self._pending_action = "paste_image"
+                return True
             mapping = {
                 ord("N"): "new",
                 ord("S"): "save",
@@ -1226,6 +1291,13 @@ class RichEdit(tk.Frame):
 
     def can_paste(self) -> bool:
         return bool(self._hwnd) and bool(IsClipboardFormatAvailable(CF_UNICODETEXT))
+
+    def can_paste_image(self) -> bool:
+        if not self._hwnd:
+            return False
+        return bool(IsClipboardFormatAvailable(CF_DIB)) or bool(
+            IsClipboardFormatAvailable(CF_DIBV5)
+        )
 
     def clear_selection(self) -> None:
         SendMessageW(self._hwnd, EM_SETSEL, 0, 0)

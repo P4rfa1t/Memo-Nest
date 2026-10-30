@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import unicodedata
 import webbrowser
@@ -32,6 +33,8 @@ INLINE_RE = re.compile(
 )
 URL_RE = re.compile(r"https?://[^\s<>()\[\]\"']+")
 ESCAPE_RE = re.compile(r"\\([\\`*_{}\[\]()#+\-.!~|>])")
+# 独占一行的图片：![alt](path)。和正文混排的图片不单独成块，按行内文本处理。
+IMAGE_LINE_RE = re.compile(r"^\s*!\[(?P<alt>[^\]]*)\]\((?P<src>[^)\s]+)(?:\s+\"[^\"]*\")?\)\s*$")
 
 
 @dataclass
@@ -45,6 +48,7 @@ class Block:
     start: int = 1
     header: list[str] = field(default_factory=list)
     rows: list[list[str]] = field(default_factory=list)
+    src: str = ""
 
 
 @dataclass
@@ -77,6 +81,8 @@ def _block_start(line: str, lines: list[str], index: int) -> bool:
     if not line.strip():
         return True
     if FENCE_RE.match(line) or HEADING_RE.match(line) or HR_RE.match(line):
+        return True
+    if IMAGE_LINE_RE.match(line):
         return True
     if QUOTE_RE.match(line) or UL_RE.match(line) or OL_RE.match(line):
         return True
@@ -123,6 +129,14 @@ def parse_blocks(md: str) -> list[Block]:
                 i += 1
             i += 1
             blocks.append(Block("code", text="\n".join(body), lang=lang))
+            continue
+
+        image = IMAGE_LINE_RE.match(line)
+        if image:
+            blocks.append(
+                Block("image", text=image.group("alt"), src=image.group("src"))
+            )
+            i += 1
             continue
 
         if HR_RE.match(line):
@@ -289,14 +303,18 @@ class MarkdownView:
         font_family: str = "Microsoft YaHei UI",
         mono_family: str = "Consolas",
         base_size: int = 11,
+        base_dir: str | os.PathLike | None = None,
     ) -> None:
         self.widget = widget
         self.palette = palette
         self.font_family = font_family
         self.mono_family = mono_family
         self.base_size = base_size
+        # 图片相对路径（assets/xxx.png）相对这个目录解析
+        self.base_dir = os.fspath(base_dir) if base_dir else None
         self._style_tags: dict[tuple[frozenset[str], str | None], str] = {}
         self._link_tags: list[str] = []
+        self._images: list[tuple[str, object]] = []
         self._configure_base_tags()
         widget.configure(
             wrap="word",
@@ -405,6 +423,8 @@ class MarkdownView:
         w = self.widget
         w.configure(state="normal")
         w.delete("1.0", "end")
+        # 上一轮的 PhotoImage 必须先丢引用再清空，否则旧图会一直占内存。
+        self._images.clear()
         for block in parse_blocks(md):
             handler = getattr(self, f"_draw_{block.kind}", None)
             if handler:
@@ -431,6 +451,41 @@ class MarkdownView:
 
     def _draw_hr(self, block: Block) -> None:
         self.widget.insert("end", "─" * 56 + "\n", "hr")
+
+    def _draw_image(self, block: Block) -> None:
+        """独占一行的图片：能加载就嵌入，加载不了就显示替换文字。"""
+        photo = self._load_photo(block.src)
+        if photo is None:
+            alt = block.text or "图片"
+            self.widget.insert("end", f"[图片：{alt}]\n", "para")
+        else:
+            self.widget.image_create("end", image=photo, padx=4, pady=6)
+            self.widget.insert("end", "\n", "para")
+
+    def _load_photo(self, src: str):
+        """把 Markdown 里的图片路径读成 Tk 可显示的 PhotoImage。
+
+        只走内置的 tkinter.PhotoImage（支持 PNG/GIF），PNG 需要 Tk 8.6+；
+        其它格式或读不到文件时返回 None，由调用方回退成文字占位。
+        """
+        import tkinter as tk
+
+        if not src:
+            return None
+        lower = src.lower()
+        if lower.startswith(("http://", "https://")):
+            return None
+        path = src
+        if not os.path.isabs(path) and self.base_dir:
+            path = os.path.join(self.base_dir, path)
+        if not os.path.isfile(path):
+            return None
+        try:
+            photo = tk.PhotoImage(master=self.widget, file=path)
+        except Exception:
+            return None
+        self._images.append((path, photo))
+        return photo
 
     def _draw_quote(self, block: Block) -> None:
         for line in block.text.split("\n"):
