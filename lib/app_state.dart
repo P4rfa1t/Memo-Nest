@@ -20,6 +20,8 @@ import '../core/paths.dart';
 import '../core/store_api.dart';
 import '../core/hello.dart';
 import '../core/vault_store.dart';
+import '../platform/host.dart';
+import '../platform/host_io.dart';
 
 enum LibraryKind { notes, vault }
 
@@ -55,16 +57,24 @@ class AppState extends ChangeNotifier {
   bool _loading = false;
   bool _dirtySinceBackup = false;
 
-  AppState({AppPaths? paths}) : paths = paths ?? AppPaths() {
-    config = Config(this.paths.configPath);
-    this.paths.ensureDirs();
-    plainStore = NoteStore.fromPaths(this.paths);
+  /// 平台宿主：窗口、自启、剪贴板、系统凭据都从这里走。
+  final Host host;
+
+  factory AppState({AppPaths? paths, Host? host}) {
+    final resolved = paths ?? AppPaths();
+    return AppState._(resolved, host ?? createHost(resolved));
+  }
+
+  AppState._(this.paths, this.host) {
+    config = Config(paths.configPath);
+    paths.ensureDirs();
+    plainStore = NoteStore.fromPaths(paths);
     _startBackupTimer();
   }
 
   // ---------- 当前库 ----------
-  /// Windows Hello 解锁服务（DPAPI 托管库密钥 + 系统验证对话框）。
-  HelloUnlock get hello => HelloUnlock(paths, config);
+  /// 系统凭据解锁服务（Windows Hello / Android 生物识别）。
+  HelloUnlock get hello => HelloUnlock(paths, config, host);
 
   bool get isVault => library == LibraryKind.vault;
   NotesStore? get store {
@@ -205,7 +215,15 @@ class AppState extends ChangeNotifier {
   // ---------- 库切换 ----------
   void switchLibrary(LibraryKind kind) {
     if (kind == library) return;
-    saveCurrent();
+    if (kind == LibraryKind.notes && library == LibraryKind.vault) {
+      // 离开私密库就立即上锁：不给「切回普通便签但密钥还在内存里」
+      // 留窗口，下次点「私密」必须重新过一次验证。
+      saveCurrent(force: true);
+      vault?.lock();
+      vaultStore = null;
+    } else {
+      saveCurrent();
+    }
     library = kind;
     if (kind == LibraryKind.vault && vaultLocked) {
       vaultPanelOpen = true;
@@ -235,22 +253,25 @@ class AppState extends ChangeNotifier {
     current = s.allNotes().isEmpty
         ? s.create(title: '私密便签', content: '')
         : s.allNotes().first;
-    _rememberHelloKey();
+    await _rememberHelloKey();
     notifyListeners();
   }
 
-  /// 库已解锁就把库密钥托给系统凭据保护，下次可以直接 Hello 解锁。
+  /// 库已解锁就把库密钥托给系统凭据保护，下次可以直接用系统验证解锁。
   ///
-  /// 失败不影响主流程（比如 DPAPI 被策略禁用），只是下次还得输密码。
-  void _rememberHelloKey() {
+  /// 失败不影响主流程（比如 DPAPI 被策略禁用、Android Keystore 不可用），
+  /// 只是下次还得输密码。
+  Future<void> _rememberHelloKey() async {
     final key = vault?.key;
     if (key == null) return;
     final service = hello;
-    if (!service.enabled) return;
+    if (!service.supported || !service.enabled) return;
     try {
-      service.remember(key);
+      await service.remember(key);
     } on HelloError {
       // 忽略：托管失败只影响便利性
+    } on HostError {
+      // 同上
     } on FileSystemException {
       // 同上
     }
@@ -265,11 +286,11 @@ class AppState extends ChangeNotifier {
     vaultPanelMode = VaultPanelMode.none;
     final s = vaultStore!;
     current = s.allNotes().isEmpty ? null : s.allNotes().first;
-    _rememberHelloKey();
+    await _rememberHelloKey();
     notifyListeners();
   }
 
-  /// 用 Windows Hello 验证并解锁。用户取消会抛 [HelloError]('已取消')。
+  /// 用系统凭据验证并解锁。用户取消会抛 [HelloError]('已取消')。
   Future<void> unlockVaultWithHello() async {
     final service = hello;
     final key = await service.retrieve();

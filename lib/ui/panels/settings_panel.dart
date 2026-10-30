@@ -4,15 +4,16 @@
 /// 切分页只是改 index，不重建控件。
 library;
 
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
-import 'package:window_manager/window_manager.dart';
 
 import '../../app_state.dart';
 import '../../core/hello.dart';
 import '../../core/backup.dart';
 import '../../core/onedrive.dart';
-import '../../platform/windows_shell.dart';
+import '../../platform/host.dart';
 import '../theme.dart';
 import '../widgets/panel_scaffold.dart';
 
@@ -140,14 +141,17 @@ class _GeneralTabState extends State<_GeneralTab> {
         const SizedBox(height: 14),
         Align(
           alignment: Alignment.centerLeft,
-          child: _actionButton('创建桌面快捷方式', () {
-            try {
-              final path = createDesktopShortcut();
-              setState(() => _note = '已创建：$path');
-            } on WindowsShellError catch (e) {
-              setState(() => _note = e.message);
-            }
-          }),
+          child: _actionButton(
+            state.host.shortcutSupported ? '创建桌面快捷方式' : '创建应用菜单项',
+            () {
+              try {
+                final path = state.host.createDesktopShortcut();
+                setState(() => _note = '已创建：$path');
+              } on HostError catch (e) {
+                setState(() => _note = e.message);
+              }
+            },
+          ),
         ),
         if (_note.isNotEmpty) ...[
           const SizedBox(height: 8),
@@ -179,8 +183,8 @@ class _GeneralTabState extends State<_GeneralTab> {
         onChanged: (next) {
           if (key == 'general.autostart') {
             try {
-              setAutostart(next);
-            } on WindowsShellError catch (e) {
+              state.host.setAutostart(next);
+            } on HostError catch (e) {
               setState(() => _note = e.message);
               return;
             }
@@ -188,7 +192,7 @@ class _GeneralTabState extends State<_GeneralTab> {
           state.config.set(key, next);
           state.config.save();
           if (key == 'general.always_on_top') {
-            windowManager.setAlwaysOnTop(next);
+            state.host.setAlwaysOnTop(next);
           }
           setState(() {});
         },
@@ -270,7 +274,7 @@ class _VaultTabState extends State<_VaultTab> {
   final _next = TextEditingController();
   final _repeat = TextEditingController();
   String _message = '';
-  /// Windows Hello 是否可用 / 已开启 / 有没有托管凭据。
+  /// 系统凭据（Windows Hello / Android 生物识别）是否可用。
   bool _deviceOk = false;
   bool _fingerprintPending = true;
 
@@ -284,10 +288,12 @@ class _VaultTabState extends State<_VaultTab> {
 
   Future<void> _probeHello() async {
     var ok = false;
-    try {
-      ok = await state.hello.deviceAvailable();
-    } on HelloError {
-      ok = false;
+    if (state.hello.supported) {
+      try {
+        ok = await state.hello.deviceAvailable();
+      } on HelloError {
+        ok = false;
+      }
     }
     if (!mounted) return;
     setState(() {
@@ -321,28 +327,27 @@ class _VaultTabState extends State<_VaultTab> {
           ),
         ),
         const SizedBox(height: 10),
-        _Row(
-          label: 'Windows Hello 解锁',
-          hint: _fingerprintPending
-              ? '正在检查…'
-              : (_deviceOk
-                  ? '用 PIN / 指纹 / 面容代替主密码。首次需要先用主密码解锁一次，'
-                      '密钥会交给系统凭据保护托管。'
-                  : '这台设备没有可用的 Windows Hello（需先在系统设置里录入 PIN）'),
-          trailing: Switch(
-            value: state.hello.enabled && _deviceOk,
-            onChanged: _deviceOk
-                ? (value) {
-                    state.hello.setEnabled(value);
-                    if (!value) {
-                      state.hello.forget();
+        if (state.hello.supported)
+          _Row(
+            label: '${state.host.authLabel} 解锁',
+            hint: _fingerprintPending
+                ? '正在检查…'
+                : (_deviceOk
+                    ? '用 ${state.host.authShort} 代替主密码。首次需要先用主密码'
+                        '解锁一次，密钥会交给系统凭据保护托管。'
+                    : '这台设备还没有录入 ${state.host.authShort}（请先在系统设置里配置）'),
+            trailing: Switch(
+              value: state.hello.enabled && _deviceOk,
+              onChanged: _deviceOk
+                  ? (value) async {
+                      await state.hello.setEnabled(value);
+                      if (!mounted) return;
+                      setState(() => _message =
+                          value ? '已开启，下次先用主密码解锁一次' : '已关闭并删除托管凭据');
                     }
-                    setState(() => _message =
-                        value ? '已开启，下次先用主密码解锁一次' : '已关闭并删除托管凭据');
-                  }
-                : null,
+                  : null,
+            ),
           ),
-        ),
         if (exists) ...[
           const SizedBox(height: 10),
           const Text(
@@ -515,6 +520,7 @@ class _OneDriveTabState extends State<_OneDriveTab> {
       setState(() => _note = '没有找到 OneDrive 文件夹，请手动填写。');
       return;
     }
+    // 只有 Windows 有 OneDrive 客户端的同步目录；其它平台靠这段文字兜住。
     _folder.text = dir.path;
     _commitFolder();
     setState(() => _note = '已填入：${dir.path}');
@@ -825,7 +831,11 @@ class _OneDriveTabState extends State<_OneDriveTab> {
       TextField(
         controller: _folder,
         style: const TextStyle(fontSize: 12.5, color: Palette.fg),
-        decoration: const InputDecoration(hintText: r'例如 C:\Users\你\OneDrive'),
+        decoration: InputDecoration(
+          hintText: state.host.isDesktop && Platform.isWindows
+              ? r'例如 C:\Users\你\OneDrive'
+              : '例如 /home/你/OneDrive',
+        ),
         onSubmitted: (_) => _commitFolder(),
         onTapOutside: (_) => _commitFolder(),
         onChanged: (_) {
@@ -844,7 +854,8 @@ class _OneDriveTabState extends State<_OneDriveTab> {
       ),
       const SizedBox(height: 8),
       const Text(
-        '留空则自动探测 OneDrive 目录；探测不到时需要手动填写。',
+        '留空则自动探测 OneDrive 目录；探测不到时需要手动填写。'
+        'Linux 上一般没有 OneDrive 客户端，建议改用「账号登录」。',
         style: TextStyle(fontSize: 11, color: Palette.muted, height: 1.6),
       ),
     ];

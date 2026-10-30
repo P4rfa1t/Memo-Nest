@@ -7,6 +7,8 @@ library;
 import 'dart:ffi';
 import 'dart:typed_data';
 
+import 'png.dart';
+
 const int _cfDib = 8;
 const int _cfDibV5 = 17;
 
@@ -148,85 +150,13 @@ int _i32(Uint8List bytes, int offset) {
 int _u16(Uint8List bytes, int offset) =>
     bytes[offset] | (bytes[offset + 1] << 8);
 
-/// 把 BGR/BGRX 位图编码成 PNG（8 位 RGB，filter 0，zlib 压缩）。
-Uint8List encodePng(ClipboardBitmap bitmap) {
-  final width = bitmap.width;
-  final height = bitmap.height;
-  final bpp = bitmap.bitCount ~/ 8;
-  final stride = ((width * bitmap.bitCount + 31) ~/ 32) * 4;
-
-  final raw = BytesBuilder();
-  for (var y = 0; y < height; y++) {
-    raw.addByte(0); // filter type: None
-    final rowStart = y * stride;
-    for (var x = 0; x < width; x++) {
-      final i = rowStart + x * bpp;
-      raw.addByte(bitmap.pixels[i + 2]); // R
-      raw.addByte(bitmap.pixels[i + 1]); // G
-      raw.addByte(bitmap.pixels[i]); // B
-    }
-  }
-  final compressed = _zlibStore(raw.takeBytes());
-
-  final out = BytesBuilder();
-  out.add(const [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
-
-  final ihdr = BytesBuilder()
-    ..add(_u32be(width))
-    ..add(_u32be(height))
-    ..add([8, 2, 0, 0, 0]); // 位深 8、颜色类型 2(RGB)
-  _chunk(out, 'IHDR', ihdr.takeBytes());
-  _chunk(out, 'IDAT', compressed);
-  _chunk(out, 'IEND', Uint8List(0));
-  return out.takeBytes();
-}
-
-void _chunk(BytesBuilder out, String tag, List<int> data) {
-  final body = <int>[...tag.codeUnits, ...data];
-  out.add(_u32be(data.length));
-  out.add(body);
-  out.add(_u32be(_crc32(body)));
-}
-
-List<int> _u32be(int v) =>
-    [(v >> 24) & 0xff, (v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff];
-
-int _crc32(List<int> data) {
-  var crc = 0xffffffff;
-  for (final byte in data) {
-    crc ^= byte;
-    for (var i = 0; i < 8; i++) {
-      crc = (crc & 1) != 0 ? (crc >> 1) ^ 0xedb88320 : crc >> 1;
-    }
-  }
-  return crc ^ 0xffffffff;
-}
-
-/// 纯 Dart 的 zlib 容器（deflate store 模式，不压缩）。
+/// 把 BGR/BGRX 位图编码成 PNG。
 ///
-/// 图片本身已经是压缩过的格式，再压一遍收益很小；
-/// 用 store 换来零依赖与可预测的速度。
-Uint8List _zlibStore(Uint8List data) {
-  final out = BytesBuilder();
-  out.add([0x78, 0x01]); // zlib header，无预设字典
-  var offset = 0;
-  while (offset < data.length) {
-    final block = (data.length - offset).clamp(0, 65535);
-    final last = offset + block >= data.length ? 1 : 0;
-    out.addByte(last);
-    out.addByte(block & 0xff);
-    out.addByte((block >> 8) & 0xff);
-    out.addByte(~block & 0xff);
-    out.addByte((~block >> 8) & 0xff);
-    out.add(data.sublist(offset, offset + block));
-    offset += block;
-  }
-  var a = 1;
-  var b = 0;
-  for (final byte in data) {
-    a = (a + byte) % 65521;
-    b = (b + a) % 65521;
-  }
-  out.add(_u32be((b << 16) | a));
-  return out.takeBytes();
-}
+/// 实现在 `png.dart` 里（纯 Dart，三个平台共用）；这里保留这个签名是因为
+/// Windows 剪贴板位图就是 DIB 布局，直接转过去即可。
+Uint8List encodePng(ClipboardBitmap bitmap) => encodeBgrPng(
+      width: bitmap.width,
+      height: bitmap.height,
+      bitCount: bitmap.bitCount,
+      pixels: bitmap.pixels,
+    );

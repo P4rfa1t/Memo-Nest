@@ -1,32 +1,31 @@
 /// 应用入口：窗口初始化、状态注入、全局快捷键。
 library;
 
+import 'dart:io';
+
 import 'package:flutter/material.dart';
-import 'package:window_manager/window_manager.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'app_state.dart';
+import 'core/paths.dart';
+import 'platform/host_io.dart';
 import 'ui/main_window.dart';
 import 'ui/theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  await windowManager.ensureInitialized();
-  const options = WindowOptions(
-    size: Size(456, 679),
-    minimumSize: Size(380, 420),
-    center: true,
-    backgroundColor: Palette.bg,
-    titleBarStyle: TitleBarStyle.hidden,
-    title: 'MemoNest 备忘录',
-    skipTaskbar: false,
-  );
-  await windowManager.waitUntilReadyToShow(options, () async {
-    await windowManager.show();
-    await windowManager.focus();
-  });
+  // Android 没有「可执行文件旁边」这个概念，应用私有目录只能通过
+  // path_provider 拿；必须在 AppState 构造之前定好根目录。
+  if (Platform.isAndroid) {
+    final dir = await getApplicationSupportDirectory();
+    setAppRootOverride(dir);
+  }
 
-  final state = AppState();
+  final host = createHost(AppPaths());
+  await host.initWindow();
+
+  final state = AppState(host: host);
   await state.initialize();
   await _applyWindowPrefs(state);
 
@@ -36,30 +35,17 @@ Future<void> main() async {
 /// 把 config.json 里的窗口相关设置落到真实窗口上。
 ///
 /// `general.window_geometry` 沿用 Python 版的 Tk 几何串 `WxH+X+Y`，
-/// 两个版本互相切换时窗口位置与大小能延续。
+/// 三个版本互相切换时窗口位置与大小能延续。
 Future<void> _applyWindowPrefs(AppState state) async {
+  if (!state.host.isDesktop) return;
   try {
     final alwaysOnTop =
         state.config.get('general.always_on_top', false) == true;
-    await windowManager.setAlwaysOnTop(alwaysOnTop);
-
     final geometry = state.config.get('general.window_geometry');
-    if (geometry is String) {
-      final match =
-          RegExp(r'^(\d+)x(\d+)([+-]\d+)([+-]\d+)?$').firstMatch(geometry);
-      if (match != null) {
-        final w = int.tryParse(match.group(1) ?? '');
-        final h = int.tryParse(match.group(2) ?? '');
-        final x = int.tryParse(match.group(3) ?? '');
-        final y = int.tryParse(match.group(4) ?? '');
-        if (w != null && h != null && w >= 380 && h >= 420) {
-          await windowManager.setSize(Size(w.toDouble(), h.toDouble()));
-          if (x != null && y != null) {
-            await windowManager.setPosition(Offset(x.toDouble(), y.toDouble()));
-          }
-        }
-      }
-    }
+    await state.host.applyWindowPrefs(
+      alwaysOnTop: alwaysOnTop,
+      geometry: geometry is String ? geometry : '',
+    );
   } on Exception catch (e) {
     debugPrint('应用窗口设置失败：$e');
   }
@@ -74,49 +60,40 @@ class MemoNestApp extends StatefulWidget {
   State<MemoNestApp> createState() => _MemoNestAppState();
 }
 
-class _MemoNestAppState extends State<MemoNestApp> with WindowListener {
+class _MemoNestAppState extends State<MemoNestApp> {
+  VoidCallback? _unsubscribe;
+
   @override
   void initState() {
     super.initState();
-    windowManager.addListener(this);
+    _unsubscribe = widget.state.host.addWindowListener(
+      onMaximize: () => widget.state.setMaximized(true),
+      onUnmaximize: () => widget.state.setMaximized(false),
+      onClose: _onClose,
+    );
   }
 
   @override
   void dispose() {
-    windowManager.removeListener(this);
+    _unsubscribe?.call();
     super.dispose();
   }
 
-  @override
-  void onWindowClose() async {
+  Future<void> _onClose() async {
     // 先落盘、再记住窗口几何，最后才真正退出。
     try {
       widget.state.saveCurrent(force: true);
-      // 最大化状态下 getSize 返回的是最大化后的尺寸，记下来会让下次启动
-      // 打开成一个「比屏幕还大」的普通窗口，所以还原一次再取。
-      final maximized = await windowManager.isMaximized();
-      if (maximized) await windowManager.unmaximize();
-      final size = await windowManager.getSize();
-      final pos = await windowManager.getPosition();
-      widget.state.config.set(
-        'general.window_geometry',
-        '${size.width.round()}x${size.height.round()}'
-            '${pos.dx >= 0 ? '+' : ''}${pos.dx.round()}'
-            '${pos.dy >= 0 ? '+' : ''}${pos.dy.round()}',
-      );
-      widget.state.config.save();
+      final geometry = await widget.state.host.currentGeometry();
+      if (geometry != null) {
+        widget.state.config.set('general.window_geometry', geometry);
+        widget.state.config.save();
+      }
     } on Exception catch (e) {
       debugPrint('退出前保存失败：$e');
     }
     widget.state.disposeState();
-    await windowManager.destroy();
+    await widget.state.host.destroyWindow();
   }
-
-  @override
-  void onWindowMaximize() => widget.state.setMaximized(true);
-
-  @override
-  void onWindowUnmaximize() => widget.state.setMaximized(false);
 
   @override
   Widget build(BuildContext context) {

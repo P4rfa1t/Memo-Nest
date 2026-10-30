@@ -263,28 +263,51 @@ class BackupService {
   }
 }
 
-/// 展开 `%VAR%` 与开头的 `~`，与 Python 的 `expandvars().expanduser()` 对齐。
+/// 展开 `%VAR%`、`$VAR`、`${VAR}` 与开头的 `~`。
+///
+/// Windows 习惯写 `%USERPROFILE%\OneDrive`，Linux 习惯写 `$HOME/x`，
+/// 两种都认，用户在哪个平台上配的路径拷到另一个平台也还能用。
 String _expandVars(String raw) {
   var out = raw;
   for (final entry in Platform.environment.entries) {
-    out = out.replaceAll('%${entry.key}%', entry.value);
+    out = out
+        .replaceAll('%${entry.key}%', entry.value)
+        .replaceAll('\${${entry.key}}', entry.value);
   }
+  // `$VAR` 形式最后处理，避免把 `$HOME` 里的 `$H` 之类误替换。
+  final dollarVar = RegExp(r'\$([A-Za-z_][A-Za-z0-9_]*)');
+  out = out.replaceAllMapped(dollarVar, (m) {
+    final value = Platform.environment[m.group(1)];
+    return value ?? m.group(0)!;
+  });
   if (out == '~' || out.startsWith('~/') || out.startsWith(r'~\')) {
-    final home = Platform.environment['USERPROFILE'] ?? '';
-    out = home + out.substring(1);
+    final home = homeDir();
+    if (home.isNotEmpty) out = home + out.substring(1);
   }
   return out;
 }
 
-/// 探测常见的 OneDrive 目录：`%OneDrive%` 优先，其次 `%USERPROFILE%\OneDrive`。
+/// 当前用户的主目录：Windows 用 USERPROFILE，Linux/macOS 用 HOME。
+String homeDir() {
+  final env = Platform.environment;
+  final home = env['HOME'];
+  if (home != null && home.isNotEmpty) return home;
+  return env['USERPROFILE'] ?? '';
+}
+
+/// 探测常见的 OneDrive 目录。
+///
+/// 只有 Windows 才有 OneDrive 客户端同步目录；其它平台返回 null，
+/// 让设置页只显示「账号登录」这一种方式。
 Directory? detectOneDriveDir() {
+  if (!Platform.isWindows) return null;
   final env = Platform.environment['OneDrive'];
   if (env != null && env.trim().isNotEmpty) {
     final dir = Directory(env.trim());
     if (dir.existsSync()) return dir;
   }
-  final home = Platform.environment['USERPROFILE'];
-  if (home != null && home.isNotEmpty) {
+  final home = homeDir();
+  if (home.isNotEmpty) {
     final dir = Directory(p.join(home, 'OneDrive'));
     if (dir.existsSync()) return dir;
   }

@@ -252,8 +252,12 @@ class GitHubService {
     return result;
   }
 
+  /// Windows 用 `where`，Linux/macOS 用 `which`；Android 上没有 git，
+  /// 直接返回 null 让上层报「找不到 git」。
   static Future<String?> _which(String name) async {
-    final result = await Process.run('where', [name], runInShell: false);
+    if (Platform.isAndroid) return null;
+    final finder = Platform.isWindows ? 'where' : 'which';
+    final result = await Process.run(finder, [name], runInShell: false);
     if (result.exitCode != 0) return null;
     final first = '${result.stdout}'
         .split('\n')

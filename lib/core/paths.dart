@@ -1,5 +1,5 @@
-/// 路径与配置：与 Python 版 `core/config.py` 同一套目录布局，
-/// 默认数据目录也指向 `data/`，这样两个版本可以共用同一份笔记。
+/// 路径与配置：三个平台共用同一套目录布局，默认数据目录都指向 `data/`，
+/// 这样同一份笔记可以在 Windows / Linux / Android 之间拷来拷去。
 library;
 
 import 'dart:convert';
@@ -8,19 +8,31 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 
 const String appName = 'MemoNest 备忘录';
-const String appVersion = '2.0.0';
+const String appVersion = '2.1.0';
+
+/// 由 `main()` 在 Android 等「拿不到 exe 路径」的平台上提前注入。
+Directory? _rootOverride;
+
+/// Android 上必须先通过 path_provider 拿到应用私有目录再调这个。
+void setAppRootOverride(Directory root) {
+  _rootOverride = root;
+}
 
 /// 配置与数据的根目录。
 ///
-/// 优先级：`MEMONEST_ROOT` 环境变量 → 便携模式（exe 旁边的 data/）→
-/// `%LOCALAPPDATA%\Programs\MemoNest`（与安装版一致）。
-/// Python 版是「exe 旁边」，这里保持同样的语义，用户把两个版本放同一目录
-/// 就能直接共用 data/。
+/// 优先级：`MEMONEST_ROOT` 环境变量 → 注入的覆盖值 → 便携模式
+/// （可执行文件旁边的 data/）→ `%LOCALAPPDATA%\Programs\MemoNest` → 可执行文件目录。
+///
+/// Android 没有「exe 旁边」这个概念，走注入值；`Platform.resolvedExecutable`
+/// 在 Android 上指向的不是应用目录，绝不能当默认值用。
 Directory resolveAppRoot() {
   final env = Platform.environment['MEMONEST_ROOT'];
   if (env != null && env.trim().isNotEmpty) {
     return Directory(env);
   }
+  final override = _rootOverride;
+  if (override != null) return override;
+
   final exeDir = File(Platform.resolvedExecutable).parent;
   final beside = Directory(p.join(exeDir.path, 'data'));
   if (beside.existsSync()) {
@@ -52,7 +64,8 @@ class AppPaths {
   String get vaultItemsDir => p.join(vaultDir, 'items');
   String get vaultTrashDir => p.join(vaultDir, 'trash');
   String get vaultMetaPath => p.join(vaultDir, 'vault.json');
-  /// Windows Hello 托管的库密钥（DPAPI 密文）。
+
+  /// 系统凭据托管的库密钥密文（Windows: DPAPI / Android: Keystore 包裹）。
   String get helloPath => p.join(vaultDir, 'hello.bin');
   String get indexPath => p.join(dataDir, 'index.json');
   String get logPath => p.join(dataDir, 'memo.log');
@@ -100,7 +113,8 @@ Map<String, dynamic> defaultConfig() => {
         'hello_unlock': true,
       },
       'vault': {
-        // 是否允许用 Windows Hello 解锁私密库（需要先用主密码解锁过一次）。
+        // 是否允许用系统凭据验证（Windows Hello / Android 生物识别）
+        // 解锁私密库，需要先用主密码解锁过一次。
         'hello_unlock': true,
       },
     };

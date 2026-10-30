@@ -30,9 +30,13 @@ class _VaultPanelState extends State<VaultPanel> {
   final _focus = <FocusNode>[FocusNode(), FocusNode(), FocusNode()];
   String _message = '';
   bool _busy = false;
-  /// 这台机器有没有可用的 Windows Hello，以及有没有已托管的凭据。
-  bool _helloDevice = false;
-  bool _helloReady = false;
+  /// 系统凭据能不能用（Windows Hello / Android 生物识别，已录入才算）。
+  ///
+  /// 这里**不看**托管记录在不在：第一次解锁时 `hello.bin` 还没有，
+  /// 要是拿它当门槛，按钮就永远不会出现（先有凭据才能解锁，
+  /// 要有凭据又得先解锁）。凭据缺失由 `retrieve()` 在点击时给提示。
+  /// 默认显示按钮：还没探测完也先给，探测到确实不可用才收起来。
+  bool _helloVisible = true;
 
   AppState get state => widget.state;
 
@@ -56,22 +60,21 @@ class _VaultPanelState extends State<VaultPanel> {
     super.dispose();
   }
 
-  /// 探测 Windows Hello：有可用验证器、且本库已经托管过密钥。
+  /// 探测这台机器能不能用 Windows Hello。
   Future<void> _probeHello() async {
-    final service = state.hello;
-    final ready = service.available;
     var device = false;
-    if (ready) {
+    if (state.hello.supported) {
       try {
-        device = await service.deviceAvailable();
+        device = await state.hello.deviceAvailable();
       } on HelloError {
+        device = false;
+      } on Exception {
         device = false;
       }
     }
     if (!mounted) return;
     setState(() {
-      _helloDevice = device;
-      _helloReady = ready;
+      _helloVisible = device;
     });
   }
 
@@ -166,7 +169,7 @@ class _VaultPanelState extends State<VaultPanel> {
                 _secondaryButton('取消', widget.onClose),
               ],
             ),
-            if (mode == VaultPanelMode.unlock && _helloReady && _helloDevice) ...[
+            if (mode == VaultPanelMode.unlock && _helloVisible) ...[
               const SizedBox(height: 8),
               GestureDetector(
                 onTap: _busy ? null : _unlockWithHello,
@@ -185,7 +188,9 @@ class _VaultPanelState extends State<VaultPanel> {
                           size: 16, color: Palette.fg),
                       const SizedBox(width: 6),
                       Text(
-                        _busy ? '等待验证…' : '用 Windows Hello 解锁',
+                        _busy
+                            ? '等待验证…'
+                            : '用 ${state.host.authLabel} 解锁',
                         style: const TextStyle(fontSize: 12.5, color: Palette.fg),
                       ),
                     ],

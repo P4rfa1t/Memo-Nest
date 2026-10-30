@@ -9,7 +9,7 @@ import 'package:flutter/services.dart';
 import '../app_state.dart';
 import '../core/models.dart';
 import '../core/note_store.dart';
-import '../platform/clipboard_image.dart';
+import '../platform/png.dart';
 import 'theme.dart';
 
 class EditorArea extends StatefulWidget {
@@ -247,7 +247,7 @@ class _EditorAreaState extends State<EditorArea> {
         value.selection.isValid && !value.selection.isCollapsed;
     final canUndo = _undo.value.canUndo;
     final canRedo = _undo.value.canRedo;
-    final hasImage = clipboardHasImage();
+    final hasImage = state.host.clipboardHasImage();
 
     final items = <_MenuEntry>[
       _MenuEntry('撤销', 'Ctrl+Z', canUndo ? () => _undo.undo() : null),
@@ -307,14 +307,19 @@ class _EditorAreaState extends State<EditorArea> {
       state.refresh();
       return;
     }
-    final bitmap = readClipboardBitmap();
+    final bitmap = state.host.readClipboardBitmap();
     if (bitmap == null) {
       state.statusMessage = '剪贴板里没有可粘贴的图片';
       state.refresh();
       return;
     }
     try {
-      final png = encodePng(bitmap);
+      final png = encodeBgrPng(
+        width: bitmap.width,
+        height: bitmap.height,
+        bitCount: bitmap.bitCount,
+        pixels: bitmap.pixels,
+      );
       final store = state.store;
       if (store is! NoteStore) {
         state.statusMessage = '私密库暂不支持粘贴图片';

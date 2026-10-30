@@ -11,7 +11,6 @@ import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as p;
-import 'package:window_manager/window_manager.dart';
 
 import '../app_state.dart';
 import '../core/models.dart';
@@ -30,6 +29,9 @@ class MainWindow extends StatefulWidget {
 
   /// 自绘标题栏高度，`main.dart` 的 `_applyWindowPrefs` 也要用。
   static const double titleBarHeight = 34;
+
+  /// 移动端没有窗口按钮，标题栏只留品牌标识，压到 26px。
+  static const double mobileTitleBarHeight = 26;
 
   /// 窗口圆角半径，`main.dart` 用同一个值裁 DWM 区域。
   static const double windowRadius = 10;
@@ -92,10 +94,9 @@ class _MainWindowState extends State<MainWindow> {
   @override
   Widget build(BuildContext context) {
     // 无边框窗口在 Windows 上默认是直角，用剪裁让四个角跟着圆角走，
-    // 否则窗口投影会在四角露出一圈方形毛边。
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(MainWindow.windowRadius),
-      child: CallbackShortcuts(
+    // 否则窗口投影会在四角露出一圈方形毛边。Android 上窗口铺满屏幕，
+    // 剪圆角反而会在四角露出透明黑边，所以只在桌面做。
+    final shell = CallbackShortcuts(
         bindings: <ShortcutActivator, VoidCallback>{
           const SingleActivator(LogicalKeyboardKey.keyF, control: true):
               _toggleSearch,
@@ -206,7 +207,12 @@ class _MainWindowState extends State<MainWindow> {
             ),
           ),
         ),
-      ),
+    );
+
+    if (!state.host.isDesktop) return shell;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(MainWindow.windowRadius),
+      child: shell,
     );
   }
 
@@ -281,12 +287,11 @@ class _MainWindowState extends State<MainWindow> {
   }
 
   Future<void> _openDataDir() async {
-    try {
-      await Process.run('explorer.exe', [state.paths.dataDir]);
-    } on ProcessException catch (e) {
-      state.statusMessage = '打开失败：${e.message}';
-      state.refresh();
-    }
+    final ok = await state.host.openFolder(state.paths.dataDir);
+    if (ok) return;
+    // 打不开就把路径摆出来让用户自己复制，比一句「失败」有用。
+    state.statusMessage = '数据目录：${state.paths.dataDir}';
+    state.refresh();
   }
 
   void _showHelp() {
@@ -361,12 +366,14 @@ class _MainWindowState extends State<MainWindow> {
       }
     }
     state.disposeState();
-    await windowManager.destroy();
+    await state.host.destroyWindow();
   }
 
   // ---------- 自绘标题栏 ----------
   // 系统标题栏是纯白/纯黑，和米黄纸面接在一起很割裂；这里整条换成纸面，
-  // 只留三个自绘按钮，拖动、双击最大化走 window_manager。
+  // 只留三个自绘按钮，拖动、双击最大化交给平台宿主处理。
+  //
+  // 移动端（Android）没有窗口概念，三个按钮直接不出现。
   Widget _buildTitleBar() {
     const hoverColor = Color(0x1A8A6A1E);
     final maximized = state.maximized;
@@ -385,46 +392,55 @@ class _MainWindowState extends State<MainWindow> {
     }
 
     return SizedBox(
-      height: MainWindow.titleBarHeight,
+      height: state.host.isDesktop
+          ? MainWindow.titleBarHeight
+          : MainWindow.mobileTitleBarHeight,
       // 拖动、双击最大化、右键系统菜单全部交给 Win32 的 WM_NCHITTEST
       // （见 windows/runner/flutter_window.cpp）：在 Dart 侧伪造拖动会冻结
       // 渲染线程，正是之前点顶栏必崩的原因。
       child: Row(
         children: [
           Expanded(
-            child: Padding(
-              padding: const EdgeInsets.only(left: 14),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _BrandMark(size: 16),
-                  SizedBox(width: 7),
-                  Text(
-                    'MemoNest 备忘录',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: Palette.fg,
-                      fontWeight: FontWeight.w500,
-                      letterSpacing: 0.2,
+            // Windows 上这块区域由 WM_NCHITTEST 判成 HTCAPTION，拖动交给系统；
+            // Linux 没有那个机制，只能在这里发起拖动。
+            child: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onPanStart: state.host.titleBarDragInDart
+                  ? (_) => state.host.startWindowDrag()
+                  : null,
+              onDoubleTap: state.host.titleBarDragInDart
+                  ? () => state.host.toggleMaximize()
+                  : null,
+              child: Padding(
+                padding: const EdgeInsets.only(left: 14),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    _BrandMark(size: 16),
+                    SizedBox(width: 7),
+                    Text(
+                      'MemoNest 备忘录',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Palette.fg,
+                        fontWeight: FontWeight.w500,
+                        letterSpacing: 0.2,
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
             ),
           ),
-          if (Platform.isWindows) ...[
+          if (state.host.isDesktop) ...[
             caption(
               icon: Icons.remove,
-              onTap: () => windowManager.minimize(),
+              onTap: () => state.host.minimize(),
             ),
             caption(
               icon: maximized ? Icons.filter_none : Icons.crop_square,
               onTap: () async {
-                if (maximized) {
-                  await windowManager.unmaximize();
-                } else {
-                  await windowManager.maximize();
-                }
+                await state.host.toggleMaximize();
                 state.setMaximized(!maximized);
               },
             ),
@@ -433,7 +449,7 @@ class _MainWindowState extends State<MainWindow> {
               close: true,
               onTap: () {
                 state.saveCurrent(force: true);
-                windowManager.close();
+                state.host.closeWindow();
               },
             ),
           ],
@@ -485,7 +501,7 @@ class _MainWindowState extends State<MainWindow> {
               });
             },
           ),
-          // 无边框窗口最右侧 8px 是 window_manager 的缩放热区，控件压上去
+          // 无边框窗口最右侧 8px 是系统的缩放热区，控件压上去
           // 松手会被当成边缘操作（实测会导致窗口直接关闭）。留 12px 余量。
           const SizedBox(width: 12),
         ],
