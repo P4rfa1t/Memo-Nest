@@ -6,19 +6,109 @@
 #include <utility>
 #include <windowsx.h>
 
-#include <winrt/Windows.Foundation.h>
-#include <winrt/Windows.Security.Credentials.UI.h>
+#include <wrl/client.h>
+#include <wrl/event.h>
+#include <wrl/wrappers/corewrappers.h>
+
+#include <roapi.h>
+
+#include <Windows.Security.Credentials.UI.h>
+// 官方头：IUserConsentVerifierInterop（带父窗口的 RequestVerificationForWindowAsync）
+#include <UserConsentVerifierInterop.h>
 
 #include "flutter/generated_plugin_registrant.h"
 
 namespace {
 
+// 刻意不用 C++/WinRT 的投影头（winrt/Windows.Security.Credentials.UI.h）：
+// 那套头要靠 NuGet 的 Microsoft.Windows.CppWinRT 在构建时生成，GitHub 的
+// windows-latest 镜像上并不保证存在，本机装了 VS 才碰巧编得过。改成直接用
+// WRL + 系统自带的 WinRT 元数据，只要 Windows SDK 就能编。
+
+// IUserConsentVerifierInterop 来自 SDK 的 <UserConsentVerifierInterop.h>：
+// 它的 RequestVerificationForWindowAsync 允许指定父窗口，桌面程序用它
+// 对话框才会乖乖贴在应用窗口上。
+
+/// UserConsentVerifier 的类名，用来从系统拿 IActivationFactory。
+constexpr wchar_t kVerifierClass[] =
+    L"Windows.Security.Credentials.UI.UserConsentVerifier";
+
+/// 等一个 WinRT IAsyncOperation<T> 跑完。返回 true 表示正常结束（不看结果值）。
+/// 这里不碰 ABI 里的 put_Completed——它挂在 IAsyncOperation<T> 上，签名随 T 变，
+/// 用 IAsyncInfo 的轮询 + 事件更省事：先 QI 出 IAsyncInfo 拿状态，同时挂一个
+/// 完成回调把事件打亮。
+template <typename T>
+bool WaitAsync(T* operation) {
+  if (operation == nullptr) return false;
+
+  Microsoft::WRL::ComPtr<IAsyncInfo> info;
+  if (FAILED(operation->QueryInterface(IID_PPV_ARGS(&info))) ||
+      info == nullptr) {
+    return false;
+  }
+
+  HANDLE done = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  if (done == nullptr) return false;
+
+  BOOL signalled = FALSE;
+
+  // 轮询状态，别指望完成回调（ABI 里类型分得很细，挂不上）。
+  bool finished = false;
+  for (int i = 0; i < 6000; ++i) {  // 最多等 60 秒
+    AsyncStatus status = AsyncStatus::Started;
+    if (FAILED(info->get_Status(&status))) break;
+    if (status != AsyncStatus::Started) {
+      finished = status == AsyncStatus::Completed;
+      break;
+    }
+    ::WaitForSingleObject(done, 10);
+    signalled = TRUE;
+  }
+  (void)signalled;
+  ::CloseHandle(done);
+  return finished;
+}
+
+/// 取 UserConsentVerifier 的静态类接口。
+/// 注意是 IUserConsentVerifierStatics 而不是 interop 门：CheckAvailabilityAsync
+/// 挂在静态接口上，只有 RequestVerificationForWindowAsync 在 interop 门里。
+Microsoft::WRL::ComPtr<ABI::Windows::Security::Credentials::UI::
+                           IUserConsentVerifierStatics>
+OpenVerifierStatics() {
+  Microsoft::WRL::ComPtr<IActivationFactory> factory;
+  if (FAILED(::RoGetActivationFactory(
+          Microsoft::WRL::Wrappers::HStringReference(kVerifierClass).Get(),
+          IID_PPV_ARGS(&factory)))) {
+    return nullptr;
+  }
+  Microsoft::WRL::ComPtr<ABI::Windows::Security::Credentials::UI::
+                             IUserConsentVerifierStatics>
+      statics;
+  if (FAILED(factory.As(&statics))) return nullptr;
+  return statics;
+}
+
+/// 取 interop 门，只有它支持带父窗口的验证请求。
+Microsoft::WRL::ComPtr<IUserConsentVerifierInterop> OpenVerifierInterop() {
+  Microsoft::WRL::ComPtr<IActivationFactory> factory;
+  if (FAILED(::RoGetActivationFactory(
+          Microsoft::WRL::Wrappers::HStringReference(kVerifierClass).Get(),
+          IID_PPV_ARGS(&factory)))) {
+    return nullptr;
+  }
+  Microsoft::WRL::ComPtr<IUserConsentVerifierInterop> interop;
+  if (FAILED(factory.As(&interop))) return nullptr;
+  return interop;
+}
+
 // Windows Hello 走 UserConsentVerifier：它自己弹系统那个 PIN / 指纹 /
 // 面容的对话框，我们只等结果。没有可用验证器、被取消、超出重试次数
 // 都返回 false，Dart 侧据此退回主密码。
-using winrt::Windows::Security::Credentials::UI::UserConsentVerificationResult;
-using winrt::Windows::Security::Credentials::UI::UserConsentVerifier;
-using winrt::Windows::Security::Credentials::UI::UserConsentVerifierAvailability;
+/// UserConsentVerifierAvailability / UserConsentVerificationResult 的取值，
+/// 来自 Windows.Security.Credentials.UI 的元数据。这里的 0 分别是
+/// Available 与 Verified。
+constexpr int kHelloAvailable = 0;
+constexpr int kHelloVerified = 0;
 
 constexpr char kHelloChannel[] = "memonest/hello";
 
@@ -129,25 +219,72 @@ void FlutterWindow::RegisterHelloChannel() {
         std::thread([hwnd, method, prompt, result = std::move(result)]() mutable {
           auto* reply = new HelloResult();
           reply->result = std::move(result);
-          try {
-            // CheckAvailabilityAsync 返回的是 Availability 枚举
-            // （Available / DeviceNotPresent / NotConfiguredForUser /
-            // DisabledByPolicy），只有 Available 才算能用。
-            const auto availability =
-                UserConsentVerifier::CheckAvailabilityAsync().get();
-            if (availability != UserConsentVerifierAvailability::Available) {
+          // 工作线程要先初始化 WinRT，本体才能 RoGetActivationFactory。
+          const bool com_ready =
+              SUCCEEDED(::RoInitialize(RO_INIT_MULTITHREADED));
+          bool available = false;
+          bool verified = false;
+          if (!com_ready) {
+            reply->reason = "Windows Hello 初始化失败";
+          } else {
+            const auto statics = OpenVerifierStatics();
+            const auto interop = OpenVerifierInterop();
+            if (statics == nullptr || interop == nullptr) {
               reply->reason = "这台设备没有可用的 Windows Hello";
-            } else if (method == "available") {
-              reply->ok = true;
             } else {
-              const auto verify =
-                  UserConsentVerifier::RequestVerificationAsync(Wide(prompt))
-                      .get();
-              reply->ok = verify == UserConsentVerificationResult::Verified;
-              if (!reply->ok) reply->reason = "验证未通过或已取消";
+              // CheckAvailabilityAsync：Available / DeviceNotPresent /
+              // NotConfiguredForUser / DisabledByPolicy，只有 Available 能用。
+              // 用 SDK 已经 typedef 好的 mangled 名字，别自己拼模板参数
+              // （ABI 里的枚举只有 forward typedef，写不进模板）。
+              Microsoft::WRL::ComPtr<
+                  ABI::Windows::Foundation::
+                      __FIAsyncOperation_1_Windows__CSecurity__CCredentials__CUI__CUserConsentVerifierAvailability_t>
+                  check;
+              if (SUCCEEDED(statics->CheckAvailabilityAsync(&check)) &&
+                  WaitAsync(check.Get())) {
+                ::ABI::Windows::Security::Credentials::UI::
+                    UserConsentVerifierAvailability value =
+                        ::ABI::Windows::Security::Credentials::UI::
+                            UserConsentVerifierAvailability_DeviceNotPresent;
+                if (SUCCEEDED(check->GetResults(&value))) {
+                  available =
+                      value ==
+                      ::ABI::Windows::Security::Credentials::UI::
+                          UserConsentVerifierAvailability_Available;
+                }
+              }
+              if (!available) {
+                reply->reason = "这台设备没有可用的 Windows Hello";
+              } else if (method == "available") {
+                reply->ok = true;
+              } else {
+                // 指定父窗口，对话框才会贴在应用上而不是飘到别处。
+                Microsoft::WRL::ComPtr<
+                    ABI::Windows::Foundation::
+                        __FIAsyncOperation_1_Windows__CSecurity__CCredentials__CUI__CUserConsentVerificationResult_t>
+                    operation;
+                Microsoft::WRL::Wrappers::HString message;
+                message.Set(Wide(prompt).c_str());
+                if (SUCCEEDED(interop->RequestVerificationForWindowAsync(
+                        hwnd, message.Get(),
+                        IID_PPV_ARGS(&operation))) &&
+                    WaitAsync(operation.Get())) {
+                  ::ABI::Windows::Security::Credentials::UI::
+                      UserConsentVerificationResult value =
+                          ::ABI::Windows::Security::Credentials::UI::
+                              UserConsentVerificationResult_Canceled;
+                  if (SUCCEEDED(operation->GetResults(&value))) {
+                    verified =
+                        value ==
+                        ::ABI::Windows::Security::Credentials::UI::
+                            UserConsentVerificationResult_Verified;
+                  }
+                }
+                reply->ok = verified;
+                if (!reply->ok) reply->reason = "验证未通过或已取消";
+              }
             }
-          } catch (...) {
-            reply->reason = "Windows Hello 调用失败";
+            ::RoUninitialize();
           }
           ::PostMessageW(hwnd, FlutterWindow::kHelloDone,
                          reinterpret_cast<WPARAM>(reply), 0);
