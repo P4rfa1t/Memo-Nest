@@ -45,6 +45,9 @@ jobs:
           $version = (Select-String -Path lib\core\paths.dart -Pattern "appVersion = '([^']+)'").Matches[0].Groups[1].Value
           "value=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
+      - name: 构建 Windows 程序
+        run: flutter build windows --release --build-name=${{ steps.version.outputs.value }}
+
       - name: 生成安装包
         shell: pwsh
         run: |

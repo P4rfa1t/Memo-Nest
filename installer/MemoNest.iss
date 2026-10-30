@@ -11,7 +11,7 @@ AppPublisher={#MyAppPublisher}
 DefaultDirName={localappdata}\Programs\MemoNest
 DefaultGroupName=MemoNest
 DisableProgramGroupPage=yes
-OutputDir=dist\installer
+OutputDir=..\dist\installer
 OutputBaseFilename=MemoNest-Setup-{#MyAppVersion}
 Compression=lzma2
 SolidCompression=yes
@@ -31,7 +31,13 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 Name: "autostart"; Description: "开机自动启动"; GroupDescription: "附加任务:"
 
 [Files]
-Source: "build\windows\x64\runner\Release\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; 相对 iss 自己所在的 installer\ 目录，..\build 才是 Flutter 的产物目录。
+;
+; Excludes 里的几项是用户数据：Release\data 下除了 Flutter 自己的 flutter_assets
+; 和 icudtl.dat，还会被运行中的应用写成数据根目录（它按 exe 旁边有没有 data\
+; 来判断应用根）。本地构建时跑过一次就有 notes\、backups\、index.json 了，
+; 不打掉的话这些笔记会被装到每个用户的机器上。
+Source: "..\build\windows\x64\runner\Release\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; Excludes: "data\notes\*,data\trash\*,data\backups\*,data\index.json,data\memo.log,data\vault\*,data\trace.txt,data\quit-trace.txt"
 
 [Icons]
 Name: "{group}\MemoNest 备忘录"; Filename: "{app}\{#MyAppExeName}"
