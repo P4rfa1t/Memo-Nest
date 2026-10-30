@@ -133,7 +133,7 @@ class _EditorAreaState extends State<EditorArea> {
               fontSize: 20,
               fontWeight: FontWeight.w700,
               color: Palette.fg,
-              height: 1.3,
+              height: 1.45,
             ),
             decoration: const InputDecoration(
               isDense: true,

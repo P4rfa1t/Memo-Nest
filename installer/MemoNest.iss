@@ -33,8 +33,11 @@ Source: "build\windows\x64\runner\Release\*"; DestDir: "{app}"; Flags: ignorever
 
 [Icons]
 Name: "{group}\MemoNest 备忘录"; Filename: "{app}\{#MyAppExeName}"
+Name: "{group}\卸载 MemoNest"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\MemoNest 备忘录"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
+
+[Registry]
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "MemoNest"; ValueData: """{app}\{#MyAppExeName}"""; Flags: uninsdeletevalue; Tasks: autostart
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "启动 MemoNest"; Flags: nowait postinstall skipifsilent
-EOF
