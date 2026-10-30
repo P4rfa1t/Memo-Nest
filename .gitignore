@@ -1,30 +1,25 @@
-# 本地配置（含邮箱应用密码 / GitHub Token，绝不提交）
-config.json
-*.json.tmp
-
-# 笔记数据与备份（笔记由应用单独推送到笔记仓库）
-data/
-
-# Python
-__pycache__/
-*.py[cod]
-.venv/
-venv/
-build/
-dist/
-*.spec
-!MemoNest.spec
-
-# 系统
-Thumbs.db
-desktop.ini
-.DS_Store
-
-# 性能测试脚本与样本数据（本地用，不进仓库）
-.perf/
-
-# Flutter 版构建缓存（源码在 flutter/ 下，产物不进仓库）
+# Flutter/Dart
 .dart_tool/
 .flutter-plugins
 .flutter-plugins-dependencies
-flutter/windows/flutter/ephemeral/
+.packages
+build/
+windows/flutter/ephemeral/
+*.iml
+.idea/
+
+# Python (legacy)
+__pycache__/
+*.pyc
+
+# User data
+data/notes/
+data/trash/
+data/backups/
+data/index.json
+config.json
+
+# Temp
+*.tmp
+*.TMP
+.perf/

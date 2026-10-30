@@ -1,477 +1,73 @@
-# MemoNest 便签
+# MemoNest 备忘录 · Flutter 版
 
-一个像便签纸一样贴在桌面角落的 Markdown 备忘录：小窗口、黄色纸面、自动保存、
-支持 OneDrive 云备份、GitHub 同步和开机自启。比较私密的便签可以单独放进
-**私密笔记库**，用主密码或 Windows Hello 解锁，其余便签仍然保持 Markdown 明文。
+同一份便签应用的 Flutter 重写版，与仓库根目录的 Python/Tk 版**并行维护**，
+共用同一份磁盘数据格式——两版可以指向同一个 `data/` 目录，随时换版本不丢数据。
 
-界面使用 [CustomTkinter](https://github.com/TomSchimansky/CustomTkinter) 绘制，
-圆角卡片 + 与纸面同色的标题栏，运行时内存约 40–60 MB，不需要 Electron 或 Qt。
-可以直接下载打包好的安装包，也可以用源码运行。
+## 为什么单独一份
 
-![MemoNest 便签](docs/screenshot.png)
+Python 版用 Tk + 原生 RichEdit 接 TSF，中文输入走系统候选窗，体积小、启动快；
+Flutter 版换来更少的运行依赖、跨平台余地和更现代的排版能力，
+代价是要重写全部界面逻辑，并且失去 Tk 版那套原生 RichEdit 光标/菜单定制。
 
-<details>
-<summary>Markdown 预览效果</summary>
+## 与 Python 版的兼容点
 
-![预览模式](docs/screenshot-preview.png)
+这些是逐字节对齐的，任何一边改动都要同步另一边：
 
-</details>
+- 便签文件：`data/notes/<slug>-<id6>.md`，YAML 风格头部 + 正文
+- 索引：`data/index.json`，`{"version": 1, "notes": [...]}`
+- 回收站：`data/trash/*.md`
+- 私密库元数据：`data/vault/vault.json`，scrypt `N=2^15, r=8, p=1`，密钥 32 字节，
+  `wrapped_key` 用 `key_tag = sha256(b"memonest-key-tag" + key)[:16]` 校验
+- 私密便签密文：`data/vault/items/<id>.mdenc`，`nonce(12) || ciphertext || tag(16)`，
+  AAD 为 `memonest-note-v1` + noteId（回收站用 `memonest-trash-v1`）
+- 备份包：`memo-backup-<yyyyMMdd-HHmmss>.zip`，内含 `notes/`、`index.json`、
+  `vault/items/`、`vault/vault.json`（去掉 `dpapi_key`）
+- 配置：`config.json`，三段 `onedrive` / `github` / `general`
 
-<details>
-<summary>卡片菜单（缓存后即时展开）</summary>
+`tool/xcompat.dart` 与仓库根的 `tools/xcompat.py` 是一对：一方写、另一方读，
+用来验证上面的格式没有走样。
 
-![卡片菜单](docs/screenshot-menu.png)
+## 开发
 
-</details>
-
-<details>
-<summary>私密笔记库：全部操作都在主窗口内完成</summary>
-
-![私密库](docs/screenshot-vault.png)
-
-![解锁面板](docs/screenshot-vault-panel.png)
-
-![创建私密库](docs/screenshot-vault-create.png)
-
-![Windows Hello 验证中](docs/screenshot-vault-hello.png)
-
-![私密库设置](docs/screenshot-settings-vault.png)
-
-</details>
-
-<details>
-<summary>设置与回收站：都在主窗口内，使用原本的 440×640 尺寸</summary>
-
-![设置 · 通用](docs/screenshot-settings.png)
-
-![设置 · OneDrive](docs/screenshot-settings-onedrive.png)
-
-![设置 · GitHub](docs/screenshot-settings-github.png)
-
-![回收站](docs/screenshot-trash.png)
-
-</details>
-
-## 功能
-
-- **小便签窗口**：默认 440×640，单条笔记视图，记忆窗口位置和大小；窗口置顶可在设置里开启
-- **Markdown**：编辑 + 应用内渲染预览，支持标题、列表、任务列表、表格、代码块、引用、链接
-- **基础备忘录**：新建、下拉切换、搜索、标签、删除（进回收站）、导出 `.md`；便签列表旁有 📌 置顶与 🗑 删除
-- **回收站**：普通和私密便签删除后都进「⋯ → 回收站」，显示标题、来源与删除时间，可一键恢复到原来的库
-- **选择性私密库**：只把私密便签移进去，逐条 AES-256-GCM 加密；顶栏「便签 / 私密」切换，主密码或 Windows Hello 解锁
-- **单窗口**：设置、私密库的创建 / 解锁 / 改密 / Hello 验证、OneDrive 登录、
-  以及确认和提示全部覆盖在主窗口内，不弹独立窗口；只有选择文件 / 文件夹时调用系统选择器
-- **内嵌面板**：私密库、设置页和回收站都覆盖在主窗口正文区，顶栏始终保留，窗口不会为了设置而放大
-- **自动保存**：停止输入约 1 秒后写入磁盘，关闭窗口时也会保存
-- **OneDrive 云备份**：两种方式——镜像到 OneDrive 同步文件夹，或直接登录 Microsoft 账号用 Graph API 上传
-- **GitHub 同步**：把笔记以 Markdown 文件提交并推送到你的仓库，私密便签只上传密文
-- **备份策略**：手动、定时（分钟）、退出前自动备份
-- **开机自启**：写入当前用户注册表 `Run` 项，可在设置中开关
-- **安装版**：PyInstaller onedir + Inno Setup，开始菜单 / 桌面快捷方式、卸载程序；GitHub Actions 自动编译并发布 Release
-- **中文输入**：正文、标题、标签、搜索都用 Windows 原生 RichEdit（TSF），
-  拼音等输入法使用系统现代候选窗，支持云候选、表情与完整的 win32 输入法行为
-- **界面即时切换**：设置、回收站、私密库面板常驻复用，显示与隐藏只在 `lift()` /
-  `lower()` 之间切换，不重建控件；设置分页叠放在同一格里靠 `tkraise()` 切换；
-  这些面板与预览区都在启动后真正空闲时才预热，打字期间不抢输入法的帧
-- **粘贴图片**：右键菜单「粘贴图片」或 `Ctrl+Shift+V` 把剪贴板里的位图存成
-  `data/notes/assets/*.png`，正文插入 `![说明](assets/xxx.png)`，预览里直接显示；
-  PNG 由内置编码器生成，不依赖 Pillow
-- **本地优先**：普通便签就是 `data/notes/*.md`，任何编辑器都能打开
-
-## 环境要求
-
-- Windows 10 / 11
-- Python 3.10+（安装时勾选 tcl/tk，默认已包含）
-- 可选：OneDrive 客户端、Git（用于 GitHub 同步）
-- 依赖：`customtkinter`、`cryptography`、`winrt-*`（Windows Hello）
-
-## 快速开始
-
-直接双击 **`start.bat`** 即可。首次运行会自动：
-
-1. 在项目内创建 `.venv` 虚拟环境（不污染系统 Python）
-2. 安装 `requirements.txt` 里的 CustomTkinter
-3. 用 `pythonw.exe` 启动，不留控制台窗口
-
-通过 `start.bat` 启动时不会留下控制台窗口；也可以直接双击 **`MemoNest.pyw`**
-（`.pyw` 由 `pythonw.exe` 打开）。手动启动：
-
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\pythonw.exe app.py
-```
-
-> 若你的 Python 来自 MSYS2 / Git Bash，虚拟环境目录是 `.venv\bin\` 而不是
-> `.venv\Scripts\`，`start.bat` 会自动识别两种布局。
-
-首次启动会自动创建 `data/notes/` 和一篇欢迎便签。私密笔记库不会自动出现，
-只有在「设置 → 私密库」里主动创建后才会生成 `data/vault/`。
-
-## 下载与安装
-
-不想装 Python？从 [Releases](https://github.com/P4rfa1t/Memo-Nest/releases)
-下载 `MemoNest-Setup-x.y.z.exe`，双击安装即可。`main` 分支的 Actions 构建产物
-在对应 workflow 运行的 **Artifacts** 里也能下载。
-
-- **按用户安装**，默认目录 `%LOCALAPPDATA%\Programs\MemoNest`，不需要管理员权限
-- 自动创建开始菜单项，可选桌面快捷方式，并注册卸载程序
-- 程序目录固定，安装时不能改到 `Program Files`——因为便签数据就写在 exe 旁边
-- 首次启动在安装目录创建 `data/` 和 `config.json`，**不写系统目录**
-- 卸载只删除程序文件，默认保留 `data/` 与 `config.json`；确认不再需要后可手动删除
-  整个安装目录
-- 开机自启写入的 `HKCU\...\Run\MemoNest` 会在卸载时自动清理
-- 程序未做代码签名，SmartScreen 可能提示「未知发布者」，
-  点「更多信息 → 仍要运行」即可
-
-### 从旧版单文件 exe 迁移
-
-旧版是把 `MemoNest.exe`、`data/`、`config.json` 放在同一个文件夹里。换成安装版时：
-
-1. 关闭旧版程序
-2. 安装 `MemoNest-Setup-x.y.z.exe`
-3. 把旧文件夹里的 `data/` 和 `config.json` 复制到
-   `%LOCALAPPDATA%\Programs\MemoNest\`
-4. 启动新版本，便签、私密库和设置都会保留
-
-## 自行打包与 GitHub Actions
-
-打包分为两步：PyInstaller 生成目录版程序，再用 Inno Setup 生成安装包。
-
-```powershell
-# 1. 安装依赖
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt pyinstaller
-winget install --id JRSoftware.InnoSetup -e
-
-# 2. 打包目录版 + 安装包（一步完成）
-powershell -ExecutionPolicy Bypass -File .\installer\build_installer.ps1 -Build
-```
-
-产物：
-
-- `dist/MemoNest/MemoNest.exe` + `dist/MemoNest/_internal/`：目录版程序，约 60 MB
-- `dist/installer/MemoNest-Setup-x.y.z.exe`：安装包
-- 版本号来自 `core/config.py` 的 `APP_VERSION`
-
-打包配置在 `MemoNest.spec`（onedir、`console=False`、收集 customtkinter 与 winrt）。
-安装器脚本在 `installer/MemoNest.iss`，中文语言文件是 `installer/ChineseSimplified.isl`。
-`build_installer.ps1` 会自动查找 `ISCC.exe`（也支持通过 `ISCC_PATH` 指定），并检查
-`dist/MemoNest/` 里没有混入开发机上的 `data/` 或 `config.json`。
-
-`.github/workflows/build.yml` 已配置自动编译（`windows-latest` + Python 3.12）：
-
-- push 到 `main`、提交 PR，或在 Actions 页面手动 `Run workflow`：
-  跑单元测试 → 打包目录版 → 生成安装包 → 上传 Artifacts
-- 推送 `v*` 标签时额外创建 Release 并附上安装包：
-
-```powershell
-git tag v1.4.0
-git push origin v1.4.0
-```
-
-## 界面
-
-```
-┌────────────────────────────────────────────┐
-│ MemoNest 便签                    ─  □  ×  │  ← 标题栏配色随纸面
-├────────────────────────────────────────────┤
-│ MemoNest [便签|私密]          预览  备份 ⋯ │
-│ [ 欢迎使用 MemoNest                    ⌄ ] 📌 🗑 🔍 + │
-│ 标题                                        │
-│ # 标签                    更新于 今天 04:24 │
-│ ┌────────────────────────────────────────┐ │
-│ │ 正文（Markdown）                       │ │
-│ └────────────────────────────────────────┘ │
-│ 就绪                             670 字 · 44 行 │
-└────────────────────────────────────────────┘
-```
-
-- **便签 / 私密**：顶栏分段按钮切换普通库与私密库；切到私密时才要求解锁，
-  从私密切回「便签」会立即锁定
-- **📌 / 🗑 / 🔍 / +**：放在便签下拉框右侧——📌 置顶当前便签（再点取消），
-  🗑 删除当前便签（进回收站），🔍 展开搜索（再点或 Esc 收起），`+` 新建
-- **预览 / 备份**：常用操作放在顶栏，一眼可见
-- **⋯ 菜单**：只保留设置、导出、打开数据文件夹、删除、回收站、使用说明、关于、退出，
-  以及「移到私密笔记库」「锁定私密笔记库」；菜单已收窄，不再占满窗口
-- **单窗口**：设置页、回收站、私密库面板、提示与确认卡片都画在主窗口里，
-  不会另外弹出对话框；设置页直接用原本的 440×640 窗口，分页内容按需加载
-- 没有传统的「文件 / 编辑 / 视图」菜单栏，窗口更像一张便签
-
-## 使用
-
-| 操作 | 方式 |
-| --- | --- |
-| 新建便签 | 顶部 `+` 或 `Ctrl+N` |
-| 切换便签 | 顶部下拉框 |
-| 置顶便签 | 点下拉框右侧的 📌，再点取消 |
-| 搜索 | 点 🔍 或 `Ctrl+F`，回车打开第一条，Esc 收起 |
-| 删除 | 点下拉框右侧的 🗑、`Ctrl+D` 或菜单里的删除，便签进入回收站 |
-| 回收站 | `⋯` 菜单 → 回收站，可恢复普通与私密便签 |
-| 编辑 / 预览 | 顶部「预览」按钮或 `Ctrl+E` |
-| 保存 | 自动保存，无需操作（`Ctrl+S` 仍可强制保存） |
-| 云备份 | 顶部「备份」或 `F5` |
-| 窗口置顶 | 「设置 → 通用」勾选「窗口始终置顶」 |
-| 切到私密库 | 顶栏「私密」，输入主密码或 Windows Hello |
-| 移入 / 移出私密库 | `⋯` 菜单 → 移到私密笔记库 / 移回普通便签 |
-| 锁定私密库 | `Ctrl+L`，切回「便签」或关闭程序时也会自动锁定 |
-| 设置 | `⋯` 菜单 → 设置，或 `Ctrl+,` |
-
-## 数据与目录
-
-```
-备忘录/
-├─ app.py                 主界面（CustomTkinter）
-├─ MemoNest.pyw           无控制台启动入口
-├─ MemoNest.spec          PyInstaller 目录版打包配置
-├─ core/
-│  ├─ config.py           配置、路径、OneDrive 检测
-│  ├─ storage.py          普通笔记读写、索引、搜索
-│  ├─ vault.py            私密库（Vault / VaultStore）
-│  ├─ crypto.py           scrypt + AES-256-GCM 加密原语
-│  ├─ hello.py            Windows Hello 验证（可选）
-│  ├─ dpapi.py            DPAPI 本机密钥包裹（可选）
-│  ├─ markdown.py         Markdown 解析与预览渲染
-│  ├─ backup.py           zip 打包、OneDrive 同步、GitHub 推送
-│  ├─ onedrive.py         OneDrive 账号登录（设备代码 OAuth）与 Graph 上传
-│  ├─ autostart.py        开机自启（注册表）
-│  ├─ shortcut.py         桌面快捷方式
-│  └─ winstyle.py         Windows 11 标题栏配色
-├─ assets/icon.ico        应用图标
-├─ docs/                  截图
-├─ tools/make_icon.py     图标生成脚本（纯标准库）
-├─ installer/
-│  ├─ MemoNest.iss        Inno Setup 安装包脚本
-│  ├─ build_installer.ps1 一键打包目录版与安装包
-│  └─ ChineseSimplified.isl  安装器简体中文语言文件
-├─ .github/workflows/build.yml  GitHub Actions：测试 + 打包 + Release
-├─ data/                  运行后生成（已 gitignore）
-│  ├─ notes/              普通便签，每篇一个 .md 文件
-│  ├─ trash/              删除的普通便签（.md + 同名 .json 元数据）
-│  ├─ backups/            本地 zip 备份
-│  ├─ vault/              私密库（创建后才出现）
-│  │  ├─ items/           每条私密便签一个 .mdenc 密文
-│  │  ├─ trash/           加密回收站
-│  │  └─ vault.json       包裹后的库密钥与参数（不含明文密钥）
-│  ├─ index.json          普通笔记元数据
-│  └─ memo.log            运行日志
-├─ config.json            本地配置（含 Token，已被 .gitignore 排除）
-├─ config.example.json    配置示例
-├─ start.bat              一键启动（自动建 venv、装依赖）
-├─ upload_to_github.ps1   一键上传本项目到 GitHub
-├─ LICENSE                MIT 许可证
-└─ tests/                 单元测试（test_core.py / test_vault.py）
-```
-
-> 用 `dist/MemoNest/MemoNest.exe` 运行时，`data/` 与 `config.json` 生成在 exe 所在目录，
-> 而不是项目目录。安装版对应的位置是
-> `%LOCALAPPDATA%\Programs\MemoNest\data\` 与
-> `%LOCALAPPDATA%\Programs\MemoNest\config.json`。
-
-## OneDrive 云备份
-
-「设置 → OneDrive」有两种方式，按你的情况选一个即可。
-
-### 方式一：同步文件夹
-
-把备份复制进 OneDrive 的本地同步文件夹，由 OneDrive 客户端负责上传。
-这样不需要账号密码，也不依赖额外接口。
-
-1. 确认 OneDrive 客户端已安装并登录（任务栏有 OneDrive 云图标）
-2. 勾选「启用 OneDrive 备份」，方式选「同步文件夹」
-3. 文件夹留空会自动使用检测到的 OneDrive 目录，也可点「检测 / 浏览」手动指定
-4. 「立即同步」可马上备份；之后可用 F5、定时备份或退出时备份
-
-### 方式二：登录 Microsoft 账号（无需 OneDrive 客户端）
-
-程序用 OAuth 2.0 **设备代码流**（公共客户端）登录你的 Microsoft 账号，
-再通过 Microsoft Graph 的 `/me/drive` 上传文件。令牌只保存在本地
-`config.json`，过期时自动用 refresh token 续期。
-
-1. 先注册一个 Azure 应用（只需一次，见下节）
-2. 在「设置 → OneDrive」把方式切到「Microsoft 账号」，填入应用 ID
-3. 点「登录 Microsoft 账号」，按主窗口里的提示在浏览器打开
-   <https://microsoft.com/devicelogin> 并输入显示的代码
-4. 登录成功后点「立即同步」
-
-#### 注册 Azure 应用（一次性）
-
-1. 打开 <https://portal.azure.com> → **Microsoft Entra ID** → **应用注册** → **新注册**
-2. 名称随意（例如 `MemoNest`），账户类型选「仅此组织目录中的账户」或
-   「任何组织目录中的账户和个人 Microsoft 账户」——想用个人账号就选后者
-3. 重定向 URI 留空即可（设备代码流不需要）
-4. 注册后在「概述」页复制 **应用程序(客户端) ID**，填到设置里
-5. 打开「身份验证」→ 拉到底部「高级设置」→
-   **允许公共客户端流** 选「是」，保存
-6. 打开「API 权限」→ 添加权限 → Microsoft Graph → 委托的权限，
-   勾选 `Files.ReadWrite`、`User.Read`、`offline_access`，然后「代表…授予管理员同意」
-   （个人账号可直接同意）
-
-> 不需要客户端密码。设备代码流是微软为无浏览器/输入受限设备设计的公共客户端流程，
-> 适合桌面小工具；令牌仅存在本机配置里。
-
-### 备份内容
-
-默认位于 OneDrive 的 `MemoNest备份/`（账号模式为 `/me/drive/root:/MemoNest备份`）：
-
-- `memo-backup-时间戳.zip`：普通笔记 + 私密库密文 + `index.json`
-- `notes/*.md`：普通便签明文镜像，手机 OneDrive 里可直接查看
-- `index.json`：普通笔记清单
-- `vault/items/*.mdenc`：私密便签密文
-- `vault/vault.json`：包裹后的库密钥（**不含** 本机 DPAPI 密钥）
-
-> 本机若未安装 OneDrive，文件夹模式会提示找不到目录。此时请安装并登录 OneDrive，
-> 或把「OneDrive 文件夹」指向任意已同步到云端的目录，也可以直接用账号模式。
-
-## 私密笔记库（可选）
-
-只有你主动移进去的便签才会加密，普通便签不受影响。
-
-1. 顶栏切到「私密」，或「设置 → 私密库」→「创建私密笔记库…」，
-   在主窗口里设置一个至少 6 位的主密码
-2. 在普通便签里打开 `⋯` 菜单 →「移到私密笔记库」
-3. 再次切到「私密」时，在同一个窗口里输入主密码或点「使用 Windows Hello 解锁」
-4. 想移出来：私密库中 `⋯` →「移回普通便签」
-5. `Ctrl+L` 立即锁定；从「私密」切回「便签」时也会立即锁定，
-   下次进入必须重新输入主密码（或再走一次 Windows Hello）
-6. 忘记主密码：在解锁面板点「忘记密码？」，确认后会删除私密库的全部内容
-   （便签、回收站与 Hello 绑定），随后可立即设置新密码
-
-私密库的所有交互（创建、解锁、改主密码、忘记密码重置、Hello 验证）都覆盖在主窗口正文区，
-**不会弹出额外窗口**；顶栏的「便签 / 私密」始终保留，随时可以点「便签」收起面板。
-
-实现要点：
-
-- 每条便签单独加密为 `data/vault/items/<id>.mdenc`，文件名不含标题，
-  也不写明文索引；正文与标题都在密文里
-- 密钥派生用 **scrypt（N=2¹⁵）**，内容加密用 **AES-256-GCM**；
-  库密钥由主密码包裹后存进 `vault.json`
-- Windows Hello 只是本机的快捷解锁：解锁密钥用 DPAPI 绑定当前 Windows 账号，
-  换电脑或换 Windows 账号会自动失效，云端永远拿不到这份密钥
-- 验证在后台线程执行，Windows 安全窗口等待期间界面不会「未响应」
-- 删除私密便签会进 `data/vault/trash/`，仍是密文
-- 云端与 GitHub 只上传 `.mdenc` 和去掉 `dpapi_key` 的 `vault.json`；
-  没有主密码无法还原内容
-
-> 主密码无法找回。解锁面板的「忘记密码？」会先删除私密库里的**全部**便签与回收站内容，
-> 再让你设置新主密码；普通便签不受影响，但删除的私密内容无法恢复。
-
-## GitHub 同步
-
-1. 在 GitHub 新建一个仓库（也可以让 `upload_to_github.ps1` 自动创建）
-2. 打开 <https://github.com/settings/tokens> 生成 Personal Access Token，勾选 `repo` 权限
-3. 「设置 → GitHub」填写 `用户名/仓库名`、分支（默认 `main`）、Token，勾选启用
-4. 点「立即推送」，笔记会以 `.md` 文件出现在仓库根目录；私密便签在 `vault/items/` 下以 `.mdenc` 出现
-
-说明：
-
-- 推送前会把普通笔记与私密库密文汇总到 `data/github/` 暂存目录，再提交推送，
-  不会污染 `data/notes`
-- Token 只保存在本地 `config.json`，推送时才临时拼进地址，**不会写入 `.git/config`**
-- 首次推送空仓库即可；若远端已有提交，程序会先合并再推送
-- 建议把笔记仓库设为 **私有**：普通便签是明文 Markdown，私密便签虽然是密文，
-  但仓库本身没必要公开
-
-## 上传本项目到 GitHub
-
-项目已初始化为 Git 仓库并完成首次提交。拿到 Token 后运行：
-
-```powershell
-.\upload_to_github.ps1 -Repo "你的用户名/memo-nest" -Token "ghp_xxxxxxxx"
-```
-
-脚本会：
-
-1. 通过 GitHub API 检查仓库，不存在则创建（默认私有）
-2. 提交当前代码
-3. 推送到指定分支
-
-> Token 只用于本次推送，`origin` 地址不会保存 Token。
-
-## 开机自启
-
-在「设置 → 通用」勾选「开机自动启动」并保存即可。实现方式：
-
-```
-HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run
-值名：MemoNest
-值（源码运行）：  "…\pythonw.exe" "…\app.py"
-值（exe 运行）：  "…\MemoNest.exe"
-```
-
-用 `pythonw.exe` 启动，不会弹出终端窗口。可在「任务管理器 → 启动应用」中查看或禁用；
-取消勾选会删除该项。安装版卸载时，安装器也会清理这个 `MemoNest` 值。
-
-## Flutter 版（`flutter` 分支）
-
-仓库的 `flutter` 分支上有一份用 Flutter 重写的版本，与这里的 Python/Tk 版并行维护。
-两者**共用同一份磁盘数据**：便签 Markdown、`index.json`、回收站、私密库
-（scrypt + AES-GCM，AAD 与 `key_tag` 算法一致）以及备份包布局都是逐字节兼容的，
-可以指向同一个 `data/` 目录随时换版本，不会丢数据。
-
-```powershell
-cd flutter
+```bash
 flutter pub get
-dart analyze .
-flutter test      # 18 项
+dart analyze .        # 本机 flutter analyze 会因中文路径崩，用 dart analyze
+flutter test
 ```
 
-Windows 构建与中文路径的注意事项见 [flutter/README.md](flutter/README.md)。
-两者的差别：Python 版用原生 RichEdit 接 TSF，中文输入走系统候选窗，包体 15 MB；
-Flutter 版没有这层原生控件定制，但依赖更少、排版更现代，整目录约 28 MB。
+`flutter test` 覆盖时间格式、Markdown 解析、明文库读写、加密库加解密与改密码、
+备份包布局与目录同步。
 
-## 测试
+## 构建（Windows）
+
+**源码目录含中文时直接构建会失败**（`Unable to read file: ...\锟斤拷锟斤拷录\...`，
+Dart 内核编译拿到乱码路径，`mklink /J` 也绕不过去）。可行做法是复制到纯 ASCII
+目录再构建：
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+$src = 'C:\Users\<you>\Documents\备忘录\flutter'
+robocopy $src C:\mnbuild /E /XD "$src\build" "$src\.dart_tool" C:\mnbuild\build C:\mnbuild\.dart_tool
+Set-Location C:\mnbuild
+flutter build windows --release
 ```
 
-共 33 项，覆盖笔记 CRUD、搜索、回收站列出与恢复、孤立 md 导入、Markdown 解析、
-zip 备份、OneDrive 镜像、GitHub 推送（本地 bare 仓库），以及私密库的
-加密往返、错误密码、改密、加密回收站（含恢复）、双库备份与 `dpapi_key` 剥离。
+`robocopy` 要在 PowerShell 里跑，bash 会破坏它的参数。
 
-## 安全提示
+产物在 `build\windows\x64\runner\Release\`，整目录约 28 MB
+（`MemoNest.exe` + `flutter_windows.dll` + `data\` + 四个插件 dll）。
 
-- `config.json` 内含 GitHub Token 与 OneDrive 令牌，已在 `.gitignore` 中排除，请勿提交或分享
-- **普通便签仍是 Markdown 明文**（`data/notes/*.md`，云端 `notes/*.md`），
-  只有移入私密库的便签才会加密
-- 私密库的强度取决于主密码；忘记主密码无法恢复
-- 备份 zip 里的私密部分同样是密文；但 zip 本身没有额外口令，
-  OneDrive 云端安全性依赖你的 Microsoft 账号
-- 删除的便签只是移动到回收站（私密库的回收站也是密文），确认无用后可手动清理
-- Windows Hello 的 DPAPI 密钥只在本机，不会上传，也不会随备份迁移
+`windows/CMakeLists.txt` 里必须有 `target_compile_options(${TARGET} PRIVATE /utf-8)`：
+源码里有中文注释与中文窗口标题，MSVC 按 GBK 读会报 `C4819`/`C2001` 并被当成错误。
 
-## 常见问题
+## 目录
 
-**找不到 OneDrive 文件夹？**
-确认 OneDrive 已登录，或在设置里手动选择同步目录；也可以把方式切到
-「Microsoft 账号」直接上传，不需要客户端。
-
-**登录 Microsoft 账号时提示应用未授权？**
-检查 Azure 应用是否已开启「允许公共客户端流」，以及是否添加了
-`Files.ReadWrite`、`User.Read`、`offline_access` 三个委托权限。
-
-**GitHub 推送失败？**
-检查 Token 是否过期、是否有 `repo` 权限、仓库名是否为 `用户名/仓库名`、
-分支是否被保护。
-
-**便签窗口太小 / 位置不对？**
-拖动边缘调整大小，关闭时会记住位置；也可删除 `config.json` 中的
-`general.window_geometry` 恢复默认。
-
-**标题栏不是便签色？**
-标题栏配色依赖 Windows 11 的 DWM 接口；Windows 10 上会保留系统默认颜色，
-其余界面不受影响。
-
-**想用其他编辑器编辑笔记？**
-普通便签直接编辑 `data/notes/*.md`，重新打开程序会自动导入未登记的文件。
-私密库中的便签必须在程序里解锁后编辑（磁盘上只有 `.mdenc` 密文）。
-
-**忘记主密码了？**
-无法恢复。在解锁面板点「忘记密码？」，确认后会删除私密库的全部内容
-（便签、回收站与 Hello 绑定），然后直接设置新主密码；普通便签不受影响。
-
-## 许可
-
-[MIT License](LICENSE) © 2026 P4rfa1t
-
-你可以自由使用、修改、分发本项目，包括商用，只需保留版权声明与许可声明。
+```
+lib/
+  main.dart              窗口初始化、退出前落盘
+  app_state.dart         两个库、当前便签、搜索、自动保存、备份调度
+  core/                  纯 Dart：模型、路径、配置、加密、Markdown、两个库、备份
+  platform/              FFI：剪贴板图片、注册表自启、桌面快捷方式
+  ui/                    主题、主窗口、编辑区、Markdown 预览、各面板
+test/core_test.dart      18 项单元测试
+tool/                    xcompat / backup_demo 这类一次性验证脚本
+```
