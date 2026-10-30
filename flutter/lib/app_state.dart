@@ -1,0 +1,466 @@
+/// 应用状态：持有两个库（普通 / 私密）、当前便签、搜索、预览等，
+/// 并负责自动保存、锁定、备份调度。
+///
+/// 这一层不碰任何 Widget，UI 通过 `ChangeNotifier` 订阅，
+/// 逻辑可以脱离 Flutter 单独测试。
+library;
+
+import 'dart:async';
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
+import 'package:path/path.dart' as p;
+
+import '../core/backup.dart';
+import '../core/github_backup.dart';
+import '../core/models.dart';
+import '../core/note_store.dart';
+import '../core/paths.dart';
+import '../core/store_api.dart';
+import '../core/vault_store.dart';
+
+enum LibraryKind { notes, vault }
+
+/// 私密库面板的三种形态。
+enum VaultPanelMode { none, create, unlock, password }
+
+class AppState extends ChangeNotifier {
+  final AppPaths paths;
+  late final Config config;
+  late NoteStore plainStore;
+  Vault? vault;
+  VaultStore? vaultStore;
+
+  LibraryKind library = LibraryKind.notes;
+  Note? current;
+
+  String searchQuery = '';
+  String? activeTag;
+  bool previewMode = false;
+  bool vaultPanelOpen = false;
+  VaultPanelMode vaultPanelMode = VaultPanelMode.none;
+  String statusMessage = '';
+
+  Timer? _autosave;
+  Timer? _backupTimer;
+  bool _dirty = false;
+  bool _loading = false;
+  bool _dirtySinceBackup = false;
+
+  AppState({AppPaths? paths})
+      : paths = paths ?? AppPaths() {
+    config = Config(this.paths.configPath);
+    this.paths.ensureDirs();
+    plainStore = NoteStore.fromPaths(this.paths);
+    _startBackupTimer();
+  }
+
+  // ---------- 当前库 ----------
+  bool get isVault => library == LibraryKind.vault;
+  NotesStore? get store {
+    if (isVault) return vaultStore;
+    return plainStore;
+  }
+
+  bool get vaultLocked => vault == null || !vault!.unlocked;
+
+  List<Note> get visibleNotes {
+    final s = store;
+    if (s == null) return const [];
+    return s.filter(query: searchQuery, tag: activeTag);
+  }
+
+  Map<String, int> get tags {
+    final s = store;
+    return s?.allTags() ?? const {};
+  }
+
+  String get libraryLabel => isVault ? '私密' : '便签';
+
+  // ---------- 初始化 ----------
+  Future<void> initialize() async {
+    if (File(paths.vaultMetaPath).existsSync()) {
+      vault = Vault(paths.vaultDir);
+    }
+    if (plainStore.allNotes().isEmpty) {
+      final welcome = plainStore.create(title: '欢迎使用 MemoNest', content: welcomeText);
+      current = welcome;
+      plainStore.save(welcome);
+    } else {
+      current = plainStore.allNotes().first;
+    }
+    notifyListeners();
+  }
+
+  // ---------- 便签操作 ----------
+  void selectNote(Note note) {
+    saveCurrent();
+    current = note;
+    _dirty = false;
+    notifyListeners();
+  }
+
+  Note? newNote() {
+    final s = store;
+    if (s == null) return null;
+    saveCurrent();
+    final note = s.create(title: '', content: '');
+    current = note;
+    _dirty = false;
+    notifyListeners();
+    return note;
+  }
+
+  void markDirty() {
+    _dirty = true;
+    _dirtySinceBackup = true;
+    _autosave?.cancel();
+    _autosave = Timer(const Duration(milliseconds: 600), saveCurrent);
+  }
+
+  void saveCurrent({bool force = false}) {
+    final s = store;
+    final note = current;
+    if (s == null || note == null) return;
+    if (!_dirty && !force) return;
+    if (_loading) return;
+    try {
+      s.save(note);
+      _dirty = false;
+      statusMessage = '已保存';
+    } on Exception catch (e) {
+      statusMessage = '保存失败：$e';
+    }
+    notifyListeners();
+  }
+
+  bool deleteCurrent() {
+    final s = store;
+    final note = current;
+    if (s == null || note == null) return false;
+    s.delete(note.id);
+    current = s.allNotes().isEmpty ? null : s.allNotes().first;
+    _dirty = false;
+    notifyListeners();
+    return true;
+  }
+
+  void togglePin() {
+    final note = current;
+    if (note == null) return;
+    note.pinned = !note.pinned;
+    saveCurrent(force: true);
+  }
+
+  void updateTitle(String value) {
+    final note = current;
+    if (note == null) return;
+    note.title = value;
+    markDirty();
+    notifyListeners();
+  }
+
+  void updateTags(String value) {
+    final note = current;
+    if (note == null) return;
+    note.tags = value
+        .split(RegExp(r'[,，\s]+'))
+        .map((t) => t.trim())
+        .where((t) => t.isNotEmpty)
+        .toList();
+    markDirty();
+    notifyListeners();
+  }
+
+  void updateContent(String value) {
+    final note = current;
+    if (note == null) return;
+    note.content = value;
+    markDirty();
+    notifyListeners();
+  }
+
+  // ---------- 搜索 ----------
+  void setQuery(String value) {
+    searchQuery = value;
+    notifyListeners();
+  }
+
+  void setTag(String? tag) {
+    activeTag = tag;
+    notifyListeners();
+  }
+
+  // ---------- 库切换 ----------
+  void switchLibrary(LibraryKind kind) {
+    if (kind == library) return;
+    saveCurrent();
+    library = kind;
+    if (kind == LibraryKind.vault && vaultLocked) {
+      vaultPanelOpen = true;
+      vaultPanelMode = vault != null && vault!.exists()
+          ? VaultPanelMode.unlock
+          : VaultPanelMode.create;
+      current = null;
+    } else {
+      final s = store;
+      current = s == null || s.allNotes().isEmpty ? null : s.allNotes().first;
+    }
+    searchQuery = '';
+    activeTag = null;
+    previewMode = false;
+    notifyListeners();
+  }
+
+  // ---------- 私密库 ----------
+  Future<void> createVault(String password) async {
+    vault ??= Vault(paths.vaultDir);
+    vault!.create(password);
+    vaultStore = VaultStore(vault!);
+    library = LibraryKind.vault;
+    vaultPanelOpen = false;
+    vaultPanelMode = VaultPanelMode.none;
+    final s = vaultStore!;
+    current = s.allNotes().isEmpty ? s.create(title: '私密便签', content: '') : s.allNotes().first;
+    notifyListeners();
+  }
+
+  Future<void> unlockVault(String password) async {
+    vault ??= Vault(paths.vaultDir);
+    vault!.unlock(password);
+    vaultStore = VaultStore(vault!);
+    library = LibraryKind.vault;
+    vaultPanelOpen = false;
+    vaultPanelMode = VaultPanelMode.none;
+    final s = vaultStore!;
+    current = s.allNotes().isEmpty ? null : s.allNotes().first;
+    notifyListeners();
+  }
+
+  void lockVault() {
+    if (vault == null) return;
+    saveCurrent(force: true);
+    vault!.lock();
+    vaultStore = null;
+    if (library == LibraryKind.vault) {
+      library = LibraryKind.notes;
+      current = plainStore.allNotes().isEmpty ? null : plainStore.allNotes().first;
+    }
+    notifyListeners();
+  }
+
+  void changeVaultPassword(String oldPassword, String newPassword) {
+    if (vault == null) throw VaultError('找不到加密库');
+    vault!.changePassword(oldPassword, newPassword);
+    notifyListeners();
+  }
+
+  /// 忘记主密码时彻底清空加密库。不可恢复，UI 侧必须先确认。
+  void resetVault() {
+    saveCurrent(force: true);
+    vault?.reset();
+    vault = null;
+    vaultStore = null;
+    if (library == LibraryKind.vault) {
+      library = LibraryKind.notes;
+      current = plainStore.allNotes().isEmpty ? null : plainStore.allNotes().first;
+    }
+    vaultPanelOpen = false;
+    vaultPanelMode = VaultPanelMode.none;
+    statusMessage = '私密库已清空';
+    notifyListeners();
+  }
+
+  /// 在普通库与私密库之间移动当前便签。
+  ///
+  /// 私密库还没解锁时先把面板打开，让用户解锁后再移动——
+  /// 明文写进加密库这种降级绝不做。
+  void moveCurrentBetweenLibraries() {
+    final note = current;
+    if (note == null) return;
+    if (isVault) {
+      if (vaultStore == null) {
+        statusMessage = '私密库已锁定';
+        notifyListeners();
+        return;
+      }
+      final moved = Note(
+        id: newId(),
+        title: note.title,
+        tags: List<String>.from(note.tags),
+        created: note.created,
+        updated: isoNow(),
+        pinned: note.pinned,
+        content: note.content,
+      );
+      plainStore.save(moved);
+      vaultStore!.delete(note.id);
+      current = moved;
+      statusMessage = '已移回普通便签';
+    } else {
+      if (vaultStore == null) {
+        vaultPanelOpen = true;
+        vaultPanelMode = vault != null && vault!.exists()
+            ? VaultPanelMode.unlock
+            : VaultPanelMode.create;
+        statusMessage = '先解锁私密库';
+        notifyListeners();
+        return;
+      }
+      final moved = Note(
+        id: newId(),
+        title: note.title,
+        tags: List<String>.from(note.tags),
+        created: note.created,
+        updated: isoNow(),
+        pinned: note.pinned,
+        content: note.content,
+      );
+      vaultStore!.save(moved);
+      plainStore.delete(note.id);
+      current = moved;
+      statusMessage = '已移到私密笔记库';
+    }
+    notifyListeners();
+  }
+
+  // ---------- 回收站 ----------
+  List<TrashEntry> trashEntries() {
+    final entries = <TrashEntry>[];
+    entries.addAll(plainStore.listTrash());
+    if (vaultStore != null) entries.addAll(vaultStore!.listTrash());
+    entries.sort((a, b) => b.deletedAt.compareTo(a.deletedAt));
+    return entries;
+  }
+
+  void restoreTrash(TrashEntry entry) {
+    if (entry.source == 'vault') {
+      vaultStore?.restoreTrash(entry);
+    } else {
+      plainStore.restoreTrash(entry);
+    }
+    notifyListeners();
+  }
+
+  void deleteTrash(TrashEntry entry) {
+    try {
+      File(entry.path).deleteSync();
+      final meta = File(entry.path.replaceAll(RegExp(r'\.(md|mdenc)$'), '.json'));
+      if (meta.existsSync()) meta.deleteSync();
+    } on FileSystemException {
+      // 忽略
+    }
+    notifyListeners();
+  }
+
+  // ---------- 备份 ----------
+  BackupService get backup => BackupService(paths, config);
+  GitHubService get github => GitHubService(paths, config);
+
+  /// 依次跑本地打包 → OneDrive → GitHub，把每一步的结果写进状态栏。
+  ///
+  /// 与 Python 版 `run_backup` 一样：一步失败不影响后面的步骤，
+  /// 失败原因逐条汇报，而不是整批放弃。
+  void runBackup({String label = ''}) {
+    final steps = <String>[];
+    try {
+      final snapshot = backup.createSnapshot(label: label);
+      steps.add('本地 ${p.basename(snapshot.path)}');
+      backup.prune();
+    } on BackupError catch (e) {
+      steps.add('本地失败：${e.message}');
+    } on FileSystemException catch (e) {
+      steps.add('本地失败：${e.message}');
+    }
+
+    if (config.get('onedrive.enabled', false) == true) {
+      try {
+        final detail = backup.mirrorToFolder();
+        if (detail != null) steps.add('OneDrive $detail');
+      } on BackupError catch (e) {
+        steps.add('OneDrive 失败：${e.message}');
+      }
+    }
+
+    if (config.get('github.enabled', false) == true) {
+      try {
+        steps.add('GitHub ${github.push()}');
+      } on GitHubError catch (e) {
+        steps.add('GitHub 失败：${e.message}');
+      }
+    }
+
+    _dirtySinceBackup = false;
+    statusMessage = steps.isEmpty ? '没有可备份的内容' : steps.join('；');
+    notifyListeners();
+  }
+
+  /// 上次备份之后有没有改动过（决定退出时要不要备份）。
+  bool get hasUnsavedBackup => _dirtySinceBackup;
+
+  void _startBackupTimer() {
+    _backupTimer?.cancel();
+    final minutes = (config.get('general.auto_backup_minutes', 0) as num).toInt();
+    if (minutes <= 0) return;
+    _backupTimer = Timer.periodic(
+      Duration(minutes: minutes),
+      (_) => runBackup(label: 'auto'),
+    );
+  }
+
+  void setAutoBackupMinutes(int minutes) {
+    config.set('general.auto_backup_minutes', minutes);
+    config.save();
+    _startBackupTimer();
+    notifyListeners();
+  }
+
+  /// UI 侧改完公开字段后调它，把变更广播出去。
+  void refresh() => notifyListeners();
+
+  // ---------- 生命周期 ----------
+  void setLoading(bool value) {
+    _loading = value;
+  }
+
+  void disposeState() {
+    _autosave?.cancel();
+    _backupTimer?.cancel();
+    saveCurrent(force: true);
+    super.dispose();
+  }
+}
+
+const String welcomeText = '''\
+这是一张可以一直贴在桌面上的便签。标题写在上方，正文直接写 Markdown。
+
+## 快速上手
+
+- 顶部下拉框切换便签，按 `+` 新建，点 📌 置顶当前便签
+- 点 🗑 删除当前便签，删掉的便签可在「⋯ → 回收站」恢复
+- 内容会自动保存，不需要手动保存
+- 点「预览」查看渲染效果，再点一次回到编辑
+- 点 🔍 搜索便签，`Esc` 收起；`Ctrl+F` 也能打开
+
+## 支持的 Markdown
+
+**加粗**、*斜体*、~~删除线~~、`行内代码`、[链接](https://example.com)
+
+```python
+print("代码块也支持")
+```
+
+- 无序列表
+- 任务列表
+- [x] 已完成的项
+
+> 引用会显示成左侧带竖线的段落。
+
+| 名称 | 数量 |
+| --- | --- |
+| 苹果 | 3 |
+
+---
+
+右键正文可以把剪贴板里的图片粘贴进来。
+''';

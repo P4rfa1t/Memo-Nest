@@ -22,3 +22,9 @@ desktop.ini
 
 # 性能测试脚本与样本数据（本地用，不进仓库）
 .perf/
+
+# Flutter 版构建缓存（源码在 flutter/ 下，产物不进仓库）
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+flutter/windows/flutter/ephemeral/

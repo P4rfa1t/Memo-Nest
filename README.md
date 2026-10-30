@@ -401,6 +401,24 @@ HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run
 用 `pythonw.exe` 启动，不会弹出终端窗口。可在「任务管理器 → 启动应用」中查看或禁用；
 取消勾选会删除该项。安装版卸载时，安装器也会清理这个 `MemoNest` 值。
 
+## Flutter 版（`flutter` 分支）
+
+仓库的 `flutter` 分支上有一份用 Flutter 重写的版本，与这里的 Python/Tk 版并行维护。
+两者**共用同一份磁盘数据**：便签 Markdown、`index.json`、回收站、私密库
+（scrypt + AES-GCM，AAD 与 `key_tag` 算法一致）以及备份包布局都是逐字节兼容的，
+可以指向同一个 `data/` 目录随时换版本，不会丢数据。
+
+```powershell
+cd flutter
+flutter pub get
+dart analyze .
+flutter test      # 18 项
+```
+
+Windows 构建与中文路径的注意事项见 [flutter/README.md](flutter/README.md)。
+两者的差别：Python 版用原生 RichEdit 接 TSF，中文输入走系统候选窗，包体 15 MB；
+Flutter 版没有这层原生控件定制，但依赖更少、排版更现代，整目录约 28 MB。
+
 ## 测试
 
 ```powershell
