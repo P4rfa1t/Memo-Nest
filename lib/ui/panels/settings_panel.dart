@@ -426,6 +426,12 @@ class _OneDriveTabState extends State<_OneDriveTab> {
   @override
   void dispose() {
     _cancelled = true;
+    // 关闭设置时把还没提交的输入落盘。
+    state.config.set('onedrive.folder', _folder.text.trim());
+    state.config.set('onedrive.client_id', _clientId.text.trim());
+    final tenant = _tenant.text.trim();
+    state.config.set('onedrive.tenant', tenant.isEmpty ? 'common' : tenant);
+    state.config.save();
     _folder.dispose();
     _clientId.dispose();
     _tenant.dispose();
@@ -698,6 +704,10 @@ class _OneDriveTabState extends State<_OneDriveTab> {
         decoration: const InputDecoration(hintText: r'例如 C:\Users\你\OneDrive'),
         onSubmitted: (_) => _commitFolder(),
         onTapOutside: (_) => _commitFolder(),
+        onChanged: (_) {
+          state.config.set('onedrive.folder', _folder.text.trim());
+          state.config.save();
+        },
       ),
       const SizedBox(height: 8),
       Wrap(
@@ -733,11 +743,18 @@ class _OneDriveTabState extends State<_OneDriveTab> {
         ),
         onSubmitted: (_) => _commitGraph(),
         onTapOutside: (_) => _commitGraph(),
+        onChanged: (_) {
+          state.config.set('onedrive.client_id', _clientId.text.trim());
+          state.config.save();
+        },
       ),
       const SizedBox(height: 4),
       const Text(
-        '在 Azure 门户免费注册一个应用即可，类型选「移动和桌面应用程序」，'
-        '并开启「允许公共客户端流」。ID 会保存在本地 config.json。',
+        '在 Azure 门户免费注册一个应用即可：\n'
+        '• 支持的帐户类型选「任何组织目录中的帐户(任何 Azure AD 目录 - 多租户)和个人 Microsoft 帐户」；\n'
+        '• 平台选「移动和桌面应用程序」，并开启「允许公共客户端流」；\n'
+        '• 个人 OneDrive 账号就能用，租户保持 common 或改为 consumers。\n'
+        'ID 会保存在本地 config.json。',
         style: TextStyle(fontSize: 11, color: Palette.muted, height: 1.6),
       ),
       const SizedBox(height: 10),
@@ -753,6 +770,11 @@ class _OneDriveTabState extends State<_OneDriveTab> {
         decoration: const InputDecoration(hintText: 'common'),
         onSubmitted: (_) => _commitGraph(),
         onTapOutside: (_) => _commitGraph(),
+        onChanged: (_) {
+          final t = _tenant.text.trim();
+          state.config.set('onedrive.tenant', t.isEmpty ? 'common' : t);
+          state.config.save();
+        },
       ),
       const SizedBox(height: 4),
       const Text(
@@ -875,6 +897,10 @@ class _GitHubTabState extends State<_GitHubTab> {
 
   @override
   void dispose() {
+    // 关闭设置时把还没提交的输入落盘，避免用户填完直接点 × 丢数据。
+    state.config.set('github.repo', _repo.text.trim());
+    state.config.set('github.token', _token.text.trim());
+    state.config.save();
     _repo.dispose();
     _token.dispose();
     super.dispose();
@@ -916,6 +942,14 @@ class _GitHubTabState extends State<_GitHubTab> {
             state.config.save();
             setState(() {});
           },
+          onTapOutside: (_) {
+            state.config.set('github.repo', _repo.text.trim());
+            state.config.save();
+          },
+          onChanged: (_) {
+            state.config.set('github.repo', _repo.text.trim());
+            state.config.save();
+          },
         ),
         const SizedBox(height: 10),
         const Text(
@@ -933,6 +967,14 @@ class _GitHubTabState extends State<_GitHubTab> {
             state.config.set('github.token', value.trim());
             state.config.save();
             setState(() {});
+          },
+          onTapOutside: (_) {
+            state.config.set('github.token', _token.text.trim());
+            state.config.save();
+          },
+          onChanged: (_) {
+            state.config.set('github.token', _token.text.trim());
+            state.config.save();
           },
         ),
         const SizedBox(height: 10),
