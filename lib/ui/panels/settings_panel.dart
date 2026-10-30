@@ -4,7 +4,6 @@
 /// 切分页只是改 index，不重建控件。
 library;
 
-
 import 'package:flutter/material.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -141,13 +140,15 @@ class _GeneralTabState extends State<_GeneralTab> {
           const SizedBox(height: 8),
           Text(
             _note,
-            style: const TextStyle(fontSize: 11, color: Palette.link, height: 1.6),
+            style:
+                const TextStyle(fontSize: 11, color: Palette.link, height: 1.6),
           ),
         ],
         const SizedBox(height: 14),
         Text(
           '数据目录：${state.paths.dataDir}',
-          style: const TextStyle(fontSize: 11, color: Palette.muted, height: 1.6),
+          style:
+              const TextStyle(fontSize: 11, color: Palette.muted, height: 1.6),
         ),
       ],
     );
@@ -287,7 +288,8 @@ class _VaultTabState extends State<_VaultTab> {
         if (exists) ...[
           const Text(
             '修改主密码',
-            style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: Palette.fg),
+            style: TextStyle(
+                fontSize: 12.5, fontWeight: FontWeight.w600, color: Palette.fg),
           ),
           const SizedBox(height: 8),
           _passwordField(_old, '当前主密码'),
@@ -315,7 +317,8 @@ class _VaultTabState extends State<_VaultTab> {
           const SizedBox(height: 10),
           Text(
             _message,
-            style: const TextStyle(fontSize: 11.5, color: Palette.link, height: 1.5),
+            style: const TextStyle(
+                fontSize: 11.5, color: Palette.link, height: 1.5),
           ),
         ],
         const SizedBox(height: 14),
@@ -464,13 +467,15 @@ class _OneDriveTabState extends State<_OneDriveTab> {
         const SizedBox(height: 10),
         const Text(
           'OneDrive 文件夹',
-          style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: Palette.fg),
+          style: TextStyle(
+              fontSize: 12.5, fontWeight: FontWeight.w600, color: Palette.fg),
         ),
         const SizedBox(height: 6),
         TextField(
           controller: _folder,
           style: const TextStyle(fontSize: 12.5, color: Palette.fg),
-          decoration: const InputDecoration(hintText: r'例如 C:\Users\你\OneDrive'),
+          decoration:
+              const InputDecoration(hintText: r'例如 C:\Users\你\OneDrive'),
           onSubmitted: (_) => _commitFolder(),
           onTapOutside: (_) => _commitFolder(),
         ),
@@ -486,13 +491,15 @@ class _OneDriveTabState extends State<_OneDriveTab> {
         const SizedBox(height: 8),
         Text(
           '留空则不复制。子目录默认是「${state.config.get('onedrive.subfolder', 'MemoNest备份')}」。',
-          style: const TextStyle(fontSize: 11, color: Palette.muted, height: 1.6),
+          style:
+              const TextStyle(fontSize: 11, color: Palette.muted, height: 1.6),
         ),
         if (_note.isNotEmpty) ...[
           const SizedBox(height: 8),
           Text(
             _note,
-            style: const TextStyle(fontSize: 11, color: Palette.link, height: 1.6),
+            style:
+                const TextStyle(fontSize: 11, color: Palette.link, height: 1.6),
           ),
         ],
       ],
@@ -521,8 +528,10 @@ class _GitHubTabState extends State<_GitHubTab> {
   @override
   void initState() {
     super.initState();
-    _repo = TextEditingController(text: '${state.config.get('github.repo', '')}');
-    _token = TextEditingController(text: '${state.config.get('github.token', '')}');
+    _repo =
+        TextEditingController(text: '${state.config.get('github.repo', '')}');
+    _token =
+        TextEditingController(text: '${state.config.get('github.token', '')}');
   }
 
   @override
@@ -555,7 +564,8 @@ class _GitHubTabState extends State<_GitHubTab> {
         const SizedBox(height: 10),
         const Text(
           '仓库',
-          style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: Palette.fg),
+          style: TextStyle(
+              fontSize: 12.5, fontWeight: FontWeight.w600, color: Palette.fg),
         ),
         const SizedBox(height: 6),
         TextField(
@@ -571,7 +581,8 @@ class _GitHubTabState extends State<_GitHubTab> {
         const SizedBox(height: 10),
         const Text(
           '访问令牌',
-          style: TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600, color: Palette.fg),
+          style: TextStyle(
+              fontSize: 12.5, fontWeight: FontWeight.w600, color: Palette.fg),
         ),
         const SizedBox(height: 6),
         TextField(
@@ -672,7 +683,8 @@ class _Row extends StatelessWidget {
                     padding: const EdgeInsets.only(top: 3),
                     child: Text(
                       hint,
-                      style: const TextStyle(fontSize: 10.5, color: Palette.muted, height: 1.55),
+                      style: const TextStyle(
+                          fontSize: 10.5, color: Palette.muted, height: 1.55),
                     ),
                   ),
               ],

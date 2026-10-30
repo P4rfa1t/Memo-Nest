@@ -26,6 +26,12 @@ import 'widgets/strip_button.dart';
 class MainWindow extends StatefulWidget {
   final AppState state;
 
+  /// 自绘标题栏高度，`main.dart` 的 `_applyWindowPrefs` 也要用。
+  static const double titleBarHeight = 34;
+
+  /// 窗口圆角半径，`main.dart` 用同一个值裁 DWM 区域。
+  static const double windowRadius = 10;
+
   const MainWindow({super.key, required this.state});
 
   @override
@@ -78,81 +84,98 @@ class _MainWindowState extends State<MainWindow> {
     });
   }
 
-  bool get _anyOverlay => _settingsOpen || _trashOpen || _menuOpen || state.vaultPanelOpen;
+  bool get _anyOverlay =>
+      _settingsOpen || _trashOpen || _menuOpen || state.vaultPanelOpen;
 
   @override
   Widget build(BuildContext context) {
-    return CallbackShortcuts(
-      bindings: <ShortcutActivator, VoidCallback>{
-        const SingleActivator(LogicalKeyboardKey.keyF, control: true): _toggleSearch,
-        const SingleActivator(LogicalKeyboardKey.keyE, control: true): () {
-          state.previewMode = !state.previewMode;
-          state.refresh();
-        },
-        const SingleActivator(LogicalKeyboardKey.keyN, control: true): () => state.newNote(),
-        const SingleActivator(LogicalKeyboardKey.keyS, control: true): () {
-          state.saveCurrent(force: true);
-        },
-        const SingleActivator(LogicalKeyboardKey.keyD, control: true): () {
-          if (!_anyOverlay) _confirmDelete();
-        },
-        const SingleActivator(LogicalKeyboardKey.keyL, control: true): () {
-          if (state.isVault) state.lockVault();
-        },
-        const SingleActivator(LogicalKeyboardKey.comma, control: true): () {
-          setState(() => _settingsOpen = true);
-        },
-        const SingleActivator(LogicalKeyboardKey.f5): () => state.runBackup(),
-        const SingleActivator(LogicalKeyboardKey.escape): () {
-          if (_anyOverlay) {
-            _closeOverlays();
-            state.vaultPanelOpen = false;
+    // 无边框窗口在 Windows 上默认是直角，用剪裁让四个角跟着圆角走，
+    // 否则窗口投影会在四角露出一圈方形毛边。
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(MainWindow.windowRadius),
+      child: CallbackShortcuts(
+        bindings: <ShortcutActivator, VoidCallback>{
+          const SingleActivator(LogicalKeyboardKey.keyF, control: true):
+              _toggleSearch,
+          const SingleActivator(LogicalKeyboardKey.keyE, control: true): () {
+            state.previewMode = !state.previewMode;
             state.refresh();
-          } else if (_searchOpen) {
-            _toggleSearch();
-          }
+          },
+          const SingleActivator(LogicalKeyboardKey.keyN, control: true): () =>
+              state.newNote(),
+          const SingleActivator(LogicalKeyboardKey.keyS, control: true): () {
+            state.saveCurrent(force: true);
+          },
+          const SingleActivator(LogicalKeyboardKey.keyD, control: true): () {
+            if (!_anyOverlay) _confirmDelete();
+          },
+          const SingleActivator(LogicalKeyboardKey.keyL, control: true): () {
+            if (state.isVault) state.lockVault();
+          },
+          const SingleActivator(LogicalKeyboardKey.comma, control: true): () {
+            setState(() => _settingsOpen = true);
+          },
+          const SingleActivator(LogicalKeyboardKey.f5): () => state.runBackup(),
+          const SingleActivator(LogicalKeyboardKey.escape): () {
+            if (_anyOverlay) {
+              _closeOverlays();
+              state.vaultPanelOpen = false;
+              state.refresh();
+            } else if (_searchOpen) {
+              _toggleSearch();
+            }
+          },
         },
-      },
-      child: Focus(
-        autofocus: true,
-        child: Scaffold(
-          backgroundColor: Palette.bg,
-          body: SafeArea(
-            child: Stack(
+        child: Focus(
+          autofocus: true,
+          child: Scaffold(
+            backgroundColor: Palette.bg,
+            body: Stack(
               children: [
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    _buildHeader(),
-                    _buildSelector(),
-                    if (_searchOpen) _buildSearchRow(),
-                    Expanded(child: _buildBody()),
-                    _buildStatusBar(),
-                  ],
+                SafeArea(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      _buildTitleBar(),
+                      _buildHeader(),
+                      _buildSelector(),
+                      if (_searchOpen) _buildSearchRow(),
+                      Expanded(child: _buildBody()),
+                      _buildStatusBar(),
+                    ],
+                  ),
                 ),
                 if (state.vaultPanelOpen)
+                  // 面板铺满整个窗口，遮住标题栏——自绘标题栏之后窗口只剩
+                  // 一圈系统边框，最大化/还原在别处也能做，不必和面板抢位置。
                   Positioned.fill(
-                    child: VaultPanel(
-                      state: state,
-                      onClose: () {
-                        state.vaultPanelOpen = false;
-                        state.vaultPanelMode = VaultPanelMode.none;
-                        state.refresh();
-                      },
+                    child: SafeArea(
+                      child: VaultPanel(
+                        state: state,
+                        onClose: () {
+                          state.vaultPanelOpen = false;
+                          state.vaultPanelMode = VaultPanelMode.none;
+                          state.refresh();
+                        },
+                      ),
                     ),
                   ),
                 if (_settingsOpen)
                   Positioned.fill(
-                    child: SettingsPanel(
-                      state: state,
-                      onClose: () => setState(() => _settingsOpen = false),
+                    child: SafeArea(
+                      child: SettingsPanel(
+                        state: state,
+                        onClose: () => setState(() => _settingsOpen = false),
+                      ),
                     ),
                   ),
                 if (_trashOpen)
                   Positioned.fill(
-                    child: TrashPanel(
-                      state: state,
-                      onClose: () => setState(() => _trashOpen = false),
+                    child: SafeArea(
+                      child: TrashPanel(
+                        state: state,
+                        onClose: () => setState(() => _trashOpen = false),
+                      ),
                     ),
                   ),
                 if (_menuOpen)
@@ -221,17 +244,17 @@ class _MainWindowState extends State<MainWindow> {
     _infoDialog(
       '使用说明',
       'MemoNest 便签\n\n'
-      '· 顶部下拉框切换便签，「＋」新建\n'
-      '· 📌 把当前便签置顶（列表最前）\n'
-      '· 🗑 删除当前便签，可在「⋯ → 回收站」里恢复\n'
-      '· 🔍 展开搜索，回车打开第一条，Esc 收起\n'
-      '· 标题与正文自动保存，无需手动保存（Ctrl+S 仍可用）\n'
-      '· 「预览」查看 Markdown 效果，Ctrl+E 切换\n'
-      '· Ctrl+N 新建 / Ctrl+F 搜索 / Ctrl+D 删除\n'
-      '$vaultTip'
-      '· 私密库里的便签加密保存，其余便签仍是 Markdown 明文\n'
-      '· OneDrive 备份可用同步文件夹，或直接登录 Microsoft 账号\n'
-      '· GitHub 备份需要 Personal Access Token（repo 权限）',
+          '· 顶部下拉框切换便签，「＋」新建\n'
+          '· 📌 把当前便签置顶（列表最前）\n'
+          '· 🗑 删除当前便签，可在「⋯ → 回收站」里恢复\n'
+          '· 🔍 展开搜索，回车打开第一条，Esc 收起\n'
+          '· 标题与正文自动保存，无需手动保存（Ctrl+S 仍可用）\n'
+          '· 「预览」查看 Markdown 效果，Ctrl+E 切换\n'
+          '· Ctrl+N 新建 / Ctrl+F 搜索 / Ctrl+D 删除\n'
+          '$vaultTip'
+          '· 私密库里的便签加密保存，其余便签仍是 Markdown 明文\n'
+          '· OneDrive 备份可用同步文件夹，或直接登录 Microsoft 账号\n'
+          '· GitHub 备份需要 Personal Access Token（repo 权限）',
     );
   }
 
@@ -239,10 +262,10 @@ class _MainWindowState extends State<MainWindow> {
     _infoDialog(
       '关于',
       'MemoNest  v2.0.0\n\n'
-      '便签式的本地 Markdown 备忘录（Flutter 重写版）。\n\n'
-      '项目地址：\n'
-      'https://github.com/P4rfa1t/Memo-Nest\n\n'
-      '数据目录：${state.paths.dataDir}',
+          '便签式的本地 Markdown 备忘录（Flutter 重写版）。\n\n'
+          '项目地址：\n'
+          'https://github.com/P4rfa1t/Memo-Nest\n\n'
+          '数据目录：${state.paths.dataDir}',
     );
   }
 
@@ -252,11 +275,13 @@ class _MainWindowState extends State<MainWindow> {
       builder: (context) => AlertDialog(
         backgroundColor: Palette.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        title: Text(title, style: const TextStyle(fontSize: 15, color: Palette.fg)),
+        title: Text(title,
+            style: const TextStyle(fontSize: 15, color: Palette.fg)),
         content: SingleChildScrollView(
           child: SelectableText(
             body,
-            style: const TextStyle(fontSize: 12.5, color: Palette.fg, height: 1.75),
+            style: const TextStyle(
+                fontSize: 12.5, color: Palette.fg, height: 1.75),
           ),
         ),
         actions: [
@@ -277,6 +302,84 @@ class _MainWindowState extends State<MainWindow> {
     }
     state.disposeState();
     await windowManager.destroy();
+  }
+
+  // ---------- 自绘标题栏 ----------
+  // 系统标题栏是纯白/纯黑，和米黄纸面接在一起很割裂；这里整条换成纸面，
+  // 只留三个自绘按钮，拖动、双击最大化走 window_manager。
+  Widget _buildTitleBar() {
+    const hoverColor = Color(0x1A8A6A1E);
+    final maximized = state.maximized;
+
+    Widget caption({
+      required IconData icon,
+      required VoidCallback onTap,
+      bool close = false,
+    }) {
+      return _CaptionButton(
+        icon: icon,
+        onTap: onTap,
+        close: close,
+        hoverColor: hoverColor,
+      );
+    }
+
+    return SizedBox(
+      height: MainWindow.titleBarHeight,
+      // 拖动、双击最大化、右键系统菜单全部交给 Win32 的 WM_NCHITTEST
+      // （见 windows/runner/flutter_window.cpp）：在 Dart 侧伪造拖动会冻结
+      // 渲染线程，正是之前点顶栏必崩的原因。
+      child: Row(
+        children: [
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.only(left: 14),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _BrandMark(size: 16),
+                  SizedBox(width: 7),
+                  Text(
+                    'MemoNest 备忘录',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Palette.fg,
+                      fontWeight: FontWeight.w500,
+                      letterSpacing: 0.2,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (Platform.isWindows) ...[
+            caption(
+              icon: Icons.remove,
+              onTap: () => windowManager.minimize(),
+            ),
+            caption(
+              icon: maximized ? Icons.filter_none : Icons.crop_square,
+              onTap: () async {
+                if (maximized) {
+                  await windowManager.unmaximize();
+                } else {
+                  await windowManager.maximize();
+                }
+                state.setMaximized(!maximized);
+              },
+            ),
+            caption(
+              icon: Icons.close,
+              close: true,
+              onTap: () {
+                state.saveCurrent(force: true);
+                windowManager.close();
+              },
+            ),
+          ],
+        ],
+      ),
+    );
   }
 
   // ---------- 顶栏 ----------
@@ -310,8 +413,17 @@ class _MainWindowState extends State<MainWindow> {
           StripButton(
             label: '⋯',
             fontSize: 16,
-            onTap: () => setState(() => _menuOpen = !_menuOpen),
+            onTap: () {
+              setState(() {
+                _menuOpen = !_menuOpen;
+                _settingsOpen = false;
+                _trashOpen = false;
+              });
+            },
           ),
+          // 无边框窗口最右侧 8px 是 window_manager 的缩放热区，控件压上去
+          // 松手会被当成边缘操作（实测会导致窗口直接关闭）。留 12px 余量。
+          const SizedBox(width: 12),
         ],
       ),
     );
@@ -376,15 +488,19 @@ class _MainWindowState extends State<MainWindow> {
               ),
               child: DropdownButtonHideUnderline(
                 child: DropdownButton<String>(
-                  value: note != null && notes.any((n) => n.id == note.id) ? note.id : null,
+                  value: note != null && notes.any((n) => n.id == note.id)
+                      ? note.id
+                      : null,
                   isExpanded: true,
                   isDense: true,
                   borderRadius: BorderRadius.circular(10),
                   dropdownColor: Palette.card,
-                  icon: const Icon(Icons.expand_more, size: 18, color: Palette.muted),
+                  icon: const Icon(Icons.expand_more,
+                      size: 18, color: Palette.muted),
                   hint: Text(
                     notes.isEmpty ? '还没有便签' : '选择便签',
-                    style: const TextStyle(fontSize: 12.5, color: Palette.muted),
+                    style:
+                        const TextStyle(fontSize: 12.5, color: Palette.muted),
                   ),
                   style: const TextStyle(fontSize: 12.5, color: Palette.fg),
                   items: [
@@ -394,7 +510,8 @@ class _MainWindowState extends State<MainWindow> {
                         child: Text(
                           '${n.pinned ? '📌 ' : ''}${n.title}',
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(fontSize: 12.5, color: Palette.fg),
+                          style: const TextStyle(
+                              fontSize: 12.5, color: Palette.fg),
                         ),
                       ),
                   ],
@@ -414,7 +531,8 @@ class _MainWindowState extends State<MainWindow> {
             onTap: () => state.newNote(),
           ),
           _iconAction(
-            icon: note?.pinned == true ? Icons.push_pin : Icons.push_pin_outlined,
+            icon:
+                note?.pinned == true ? Icons.push_pin : Icons.push_pin_outlined,
             tooltip: note?.pinned == true ? '取消置顶' : '置顶当前便签',
             color: note?.pinned == true ? Palette.accentHover : Palette.muted,
             onTap: () => state.togglePin(),
@@ -462,7 +580,8 @@ class _MainWindowState extends State<MainWindow> {
       builder: (context) => AlertDialog(
         backgroundColor: Palette.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        title: const Text('删除便签', style: TextStyle(fontSize: 15, color: Palette.fg)),
+        title: const Text('删除便签',
+            style: TextStyle(fontSize: 15, color: Palette.fg)),
         content: Text(
           '「${note.title}」将被移到回收站，可以在「⋯ → 回收站」里恢复。',
           style: const TextStyle(fontSize: 13, color: Palette.fg, height: 1.6),
@@ -543,11 +662,14 @@ class _MainWindowState extends State<MainWindow> {
     final note = state.current;
     if (note == null) {
       return const Center(
-        child: Text('没有打开的便签', style: TextStyle(fontSize: 13, color: Palette.muted)),
+        child: Text('没有打开的便签',
+            style: TextStyle(fontSize: 13, color: Palette.muted)),
       );
     }
     // 图片相对路径要按当前库解析：私密库的 assets 在 vault/items 下。
-    return MarkdownView(source: note.content, baseDir: state.store?.notesDir ?? state.paths.notesDir);
+    return MarkdownView(
+        source: note.content,
+        baseDir: state.store?.notesDir ?? state.paths.notesDir);
   }
 
   // ---------- 状态栏 ----------
@@ -577,5 +699,74 @@ class _MainWindowState extends State<MainWindow> {
     final chars = content.replaceAll(RegExp(r'\s'), '').length;
     final lines = content.isEmpty ? 0 : content.split('\n').length;
     return '$chars 字 · $lines 行';
+  }
+}
+
+/// 自绘标题栏的最小化/最大化/关闭按钮。
+class _CaptionButton extends StatefulWidget {
+  final IconData icon;
+  final VoidCallback onTap;
+  final bool close;
+  final Color hoverColor;
+
+  const _CaptionButton({
+    required this.icon,
+    required this.onTap,
+    required this.hoverColor,
+    this.close = false,
+  });
+
+  @override
+  State<_CaptionButton> createState() => _CaptionButtonState();
+}
+
+class _CaptionButtonState extends State<_CaptionButton> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final bg = _hover
+        ? (widget.close ? const Color(0xFFE81123) : widget.hoverColor)
+        : Colors.transparent;
+    final iconColor = widget.close && _hover ? Colors.white : Palette.fg;
+    return MouseRegion(
+      cursor: SystemMouseCursors.click,
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: widget.onTap,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 90),
+          width: 44,
+          height: MainWindow.titleBarHeight,
+          color: bg,
+          child: Icon(widget.icon, size: 14, color: iconColor),
+        ),
+      ),
+    );
+  }
+}
+
+/// 标题栏左侧的小图标：圆角方块 + 三行「便签」笔画，不引入位图资源。
+class _BrandMark extends StatelessWidget {
+  final double size;
+
+  const _BrandMark({this.size = 16});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        color: Palette.strip,
+        borderRadius: BorderRadius.circular(size * 0.28),
+        border: Border.all(color: const Color(0xFFDCC888)),
+      ),
+      alignment: Alignment.center,
+      child: Icon(Icons.sticky_note_2_outlined,
+          size: size * 0.72, color: Palette.muted),
+    );
   }
 }

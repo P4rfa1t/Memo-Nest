@@ -17,12 +17,15 @@ bool get autostartSupported => Platform.isWindows;
 /// 读注册表判断当前是否已启用（值必须与 [launchCommand] 完全一致）。
 bool autostartEnabled() {
   if (!autostartSupported) return false;
-  final result = Process.runSync('reg', [
-    'query',
-    _runKey,
-    '/v',
-    _valueName,
-  ], runInShell: false);
+  final result = Process.runSync(
+      'reg',
+      [
+        'query',
+        _runKey,
+        '/v',
+        _valueName,
+      ],
+      runInShell: false);
   if (result.exitCode != 0) return false;
   final text = '${result.stdout}';
   final match = RegExp(r'REG_SZ\s+(.+)$', multiLine: true).firstMatch(text);
@@ -36,24 +39,30 @@ void setAutostart(bool enabled) {
     throw const WindowsShellError('开机自启仅支持 Windows');
   }
   final result = enabled
-      ? Process.runSync('reg', [
-          'add',
-          _runKey,
-          '/v',
-          _valueName,
-          '/t',
-          'REG_SZ',
-          '/d',
-          launchCommand(),
-          '/f',
-        ], runInShell: false)
-      : Process.runSync('reg', [
-          'delete',
-          _runKey,
-          '/v',
-          _valueName,
-          '/f',
-        ], runInShell: false);
+      ? Process.runSync(
+          'reg',
+          [
+            'add',
+            _runKey,
+            '/v',
+            _valueName,
+            '/t',
+            'REG_SZ',
+            '/d',
+            launchCommand(),
+            '/f',
+          ],
+          runInShell: false)
+      : Process.runSync(
+          'reg',
+          [
+            'delete',
+            _runKey,
+            '/v',
+            _valueName,
+            '/f',
+          ],
+          runInShell: false);
   // 删除一个本来就不存在的值会返回非 0，这不算错。
   if (!enabled) return;
   if (result.exitCode != 0) {
@@ -78,14 +87,17 @@ String createDesktopShortcut() {
 \$sc.Save()
 Write-Output \$lnk
 ''';
-  final result = Process.runSync('powershell', [
-    '-NoProfile',
-    '-NonInteractive',
-    '-ExecutionPolicy',
-    'Bypass',
-    '-Command',
-    script,
-  ], runInShell: false);
+  final result = Process.runSync(
+      'powershell',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-ExecutionPolicy',
+        'Bypass',
+        '-Command',
+        script,
+      ],
+      runInShell: false);
   if (result.exitCode != 0) {
     throw WindowsShellError('创建快捷方式失败：${result.stderr}');
   }

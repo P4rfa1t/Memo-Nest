@@ -69,7 +69,8 @@ class _VaultPanelState extends State<VaultPanel> {
           children: [
             Text(
               spec.description,
-              style: const TextStyle(fontSize: 11.5, color: Palette.muted, height: 1.6),
+              style: const TextStyle(
+                  fontSize: 11.5, color: Palette.muted, height: 1.6),
             ),
             const SizedBox(height: 14),
             for (var i = 0; i < spec.fieldCount; i++) ...[
@@ -79,8 +80,9 @@ class _VaultPanelState extends State<VaultPanel> {
                 obscureText: true,
                 style: const TextStyle(fontSize: 12.5, color: Palette.fg),
                 decoration: InputDecoration(hintText: spec.hints[i]),
-                textInputAction:
-                    i == spec.fieldCount - 1 ? TextInputAction.done : TextInputAction.next,
+                textInputAction: i == spec.fieldCount - 1
+                    ? TextInputAction.done
+                    : TextInputAction.next,
                 onSubmitted: (_) {
                   if (i == spec.fieldCount - 1) {
                     _submit();
@@ -95,7 +97,8 @@ class _VaultPanelState extends State<VaultPanel> {
               const SizedBox(height: 2),
               Text(
                 _message,
-                style: const TextStyle(fontSize: 11.5, color: Palette.danger, height: 1.5),
+                style: const TextStyle(
+                    fontSize: 11.5, color: Palette.danger, height: 1.5),
               ),
             ],
             const SizedBox(height: 12),
@@ -142,12 +145,15 @@ class _VaultPanelState extends State<VaultPanel> {
         height: 34,
         alignment: Alignment.center,
         decoration: BoxDecoration(
-          color: onTap == null ? Palette.strip.withValues(alpha: 0.6) : Palette.accent,
+          color: onTap == null
+              ? Palette.strip.withValues(alpha: 0.6)
+              : Palette.accent,
           borderRadius: BorderRadius.circular(9),
         ),
         child: Text(
           label,
-          style: const TextStyle(fontSize: 12.5, color: Palette.fg, fontWeight: FontWeight.w600),
+          style: const TextStyle(
+              fontSize: 12.5, color: Palette.fg, fontWeight: FontWeight.w600),
         ),
       ),
     );
@@ -165,7 +171,8 @@ class _VaultPanelState extends State<VaultPanel> {
           borderRadius: BorderRadius.circular(9),
           border: Border.all(color: const Color(0xFFDCC888)),
         ),
-        child: Text(label, style: const TextStyle(fontSize: 12.5, color: Palette.fg)),
+        child: Text(label,
+            style: const TextStyle(fontSize: 12.5, color: Palette.fg)),
       ),
     );
   }
@@ -177,7 +184,8 @@ class _VaultPanelState extends State<VaultPanel> {
       builder: (context) => AlertDialog(
         backgroundColor: Palette.card,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-        title: const Text('忘记主密码', style: TextStyle(fontSize: 15, color: Palette.fg)),
+        title: const Text('忘记主密码',
+            style: TextStyle(fontSize: 15, color: Palette.fg)),
         content: const Text(
           '重置主密码会永久删除私密库里的全部便签和回收站内容，且无法恢复。\n\n'
           '普通便签不受影响。确定继续吗？',

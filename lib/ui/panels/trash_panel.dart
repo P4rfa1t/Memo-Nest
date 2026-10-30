@@ -93,14 +93,16 @@ class _TrashPanelState extends State<TrashPanel> {
               children: [
                 for (final tag in entry.tags)
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
                     decoration: BoxDecoration(
                       color: Palette.strip,
                       borderRadius: BorderRadius.circular(5),
                     ),
                     child: Text(
                       tag,
-                      style: const TextStyle(fontSize: 10, color: Palette.muted),
+                      style:
+                          const TextStyle(fontSize: 10, color: Palette.muted),
                     ),
                   ),
               ],
@@ -137,7 +139,8 @@ class _TrashPanelState extends State<TrashPanel> {
         ),
         child: Text(
           label,
-          style: TextStyle(fontSize: 11, color: danger ? Palette.danger : Palette.fg),
+          style: TextStyle(
+              fontSize: 11, color: danger ? Palette.danger : Palette.fg),
         ),
       ),
     );

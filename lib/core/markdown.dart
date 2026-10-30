@@ -7,7 +7,8 @@ library;
 import 'dart:convert';
 
 class MdBlock {
-  final String kind; // heading | paragraph | list | quote | code | hr | table | image
+  final String
+      kind; // heading | paragraph | list | quote | code | hr | table | image
   final String text;
   final int level;
   final String lang;
@@ -148,7 +149,8 @@ List<MdBlock> parseBlocks(String md) {
     final image = _imageLineRe.firstMatch(line);
     if (image != null) {
       blocks.add(MdBlock('image',
-          text: image.namedGroup('alt') ?? '', src: image.namedGroup('src') ?? ''));
+          text: image.namedGroup('alt') ?? '',
+          src: image.namedGroup('src') ?? ''));
       i++;
       continue;
     }
@@ -207,8 +209,7 @@ List<MdBlock> parseBlocks(String md) {
         items.add(match.group(3)!.trim());
         i++;
       }
-      blocks.add(MdBlock('list',
-          items: items, ordered: ordered, start: start));
+      blocks.add(MdBlock('list', items: items, ordered: ordered, start: start));
       continue;
     }
 
@@ -336,11 +337,16 @@ String stripMarkers(String text) {
     return '';
   }
 
-  out = out.replaceAllMapped(_linkRe, (m) => pick(m as RegExpMatch, const ['text']));
-  out = out.replaceAllMapped(_boldRe, (m) => pick(m as RegExpMatch, const ['b1', 'b2']));
-  out = out.replaceAllMapped(_italicRe, (m) => pick(m as RegExpMatch, const ['i1', 'i2']));
-  out = out.replaceAllMapped(_strikeRe, (m) => pick(m as RegExpMatch, const ['s']));
-  out = out.replaceAllMapped(_codeRe, (m) => pick(m as RegExpMatch, const ['code']));
+  out = out.replaceAllMapped(
+      _linkRe, (m) => pick(m as RegExpMatch, const ['text']));
+  out = out.replaceAllMapped(
+      _boldRe, (m) => pick(m as RegExpMatch, const ['b1', 'b2']));
+  out = out.replaceAllMapped(
+      _italicRe, (m) => pick(m as RegExpMatch, const ['i1', 'i2']));
+  out = out.replaceAllMapped(
+      _strikeRe, (m) => pick(m as RegExpMatch, const ['s']));
+  out = out.replaceAllMapped(
+      _codeRe, (m) => pick(m as RegExpMatch, const ['code']));
   out = out.replaceAll(RegExp(r'^#{1,6}\s*', multiLine: true), '');
   out = out.replaceAll(RegExp(r'^\s*[-*+]\s+', multiLine: true), '');
   out = out.replaceAll(RegExp(r'^\s*\d+[.)]\s+', multiLine: true), '');

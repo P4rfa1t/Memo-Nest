@@ -48,14 +48,16 @@ class _Win32 {
 
   late final _OpenClipboardD openClipboard =
       user32.lookupFunction<_OpenClipboardC, _OpenClipboardD>('OpenClipboard');
-  late final _CloseClipboardD closeClipboard =
-      user32.lookupFunction<_CloseClipboardC, _CloseClipboardD>('CloseClipboard');
+  late final _CloseClipboardD closeClipboard = user32
+      .lookupFunction<_CloseClipboardC, _CloseClipboardD>('CloseClipboard');
   late final _IsClipboardFormatAvailableD isFormatAvailable =
-      user32.lookupFunction<_IsClipboardFormatAvailableC, _IsClipboardFormatAvailableD>(
+      user32.lookupFunction<_IsClipboardFormatAvailableC,
+          _IsClipboardFormatAvailableD>(
     'IsClipboardFormatAvailable',
   );
   late final _GetClipboardDataD getClipboardData =
-      user32.lookupFunction<_GetClipboardDataC, _GetClipboardDataD>('GetClipboardData');
+      user32.lookupFunction<_GetClipboardDataC, _GetClipboardDataD>(
+          'GetClipboardData');
   late final _GlobalLockD globalLock =
       kernel32.lookupFunction<_GlobalLockC, _GlobalLockD>('GlobalLock');
   late final _GlobalUnlockD globalUnlock =
@@ -72,7 +74,8 @@ _Win32 get _api => _win32 ??= _Win32();
 bool clipboardHasImage() {
   try {
     final api = _api;
-    return api.isFormatAvailable(_cfDib) != 0 || api.isFormatAvailable(_cfDibV5) != 0;
+    return api.isFormatAvailable(_cfDib) != 0 ||
+        api.isFormatAvailable(_cfDibV5) != 0;
   } on Object {
     return false;
   }
@@ -142,7 +145,8 @@ int _i32(Uint8List bytes, int offset) {
   return v & 0x80000000 != 0 ? v - 0x100000000 : v;
 }
 
-int _u16(Uint8List bytes, int offset) => bytes[offset] | (bytes[offset + 1] << 8);
+int _u16(Uint8List bytes, int offset) =>
+    bytes[offset] | (bytes[offset + 1] << 8);
 
 /// 把 BGR/BGRX 位图编码成 PNG（8 位 RGB，filter 0，zlib 压缩）。
 Uint8List encodePng(ClipboardBitmap bitmap) {
@@ -184,7 +188,8 @@ void _chunk(BytesBuilder out, String tag, List<int> data) {
   out.add(_u32be(_crc32(body)));
 }
 
-List<int> _u32be(int v) => [(v >> 24) & 0xff, (v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff];
+List<int> _u32be(int v) =>
+    [(v >> 24) & 0xff, (v >> 16) & 0xff, (v >> 8) & 0xff, v & 0xff];
 
 int _crc32(List<int> data) {
   var crc = 0xffffffff;

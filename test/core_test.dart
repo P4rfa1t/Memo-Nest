@@ -20,7 +20,8 @@ import 'package:path/path.dart' as p;
 late Directory tmpRoot;
 
 AppPaths makePaths(String name) {
-  final root = Directory(p.join(tmpRoot.path, name))..createSync(recursive: true);
+  final root = Directory(p.join(tmpRoot.path, name))
+    ..createSync(recursive: true);
   return AppPaths(root);
 }
 
@@ -104,7 +105,8 @@ void main() {
 
       final note = store.create(title: '第一条', content: '正文内容');
       expect(note.id.length, 12);
-      final file = File(p.join(paths.notesDir, '${slug('第一条')}-${note.id.substring(0, 6)}.md'));
+      final file = File(p.join(
+          paths.notesDir, '${slug('第一条')}-${note.id.substring(0, 6)}.md'));
       expect(file.existsSync(), isTrue);
       expect(file.readAsStringSync(), contains('正文内容'));
 
@@ -166,7 +168,8 @@ void main() {
       final blob = File(p.join(paths.vaultItemsDir, '${note.id}.mdenc'));
       expect(blob.existsSync(), isTrue);
       // 密文里不能出现明文
-      expect(utf8.decode(blob.readAsBytesSync(), allowMalformed: true), isNot(contains('这是私密内容')));
+      expect(utf8.decode(blob.readAsBytesSync(), allowMalformed: true),
+          isNot(contains('这是私密内容')));
 
       final reopened = Vault(paths.vaultDir);
       expect(() => reopened.unlock('错误密码'), throwsA(isA<VaultError>()));
@@ -239,10 +242,14 @@ void main() {
       expect(p.basename(zip.path), endsWith('.zip'));
 
       final names = _zipEntryNames(zip.readAsBytesSync());
-      expect(names.any((n) => n.startsWith('notes/') && n.endsWith('.md')), isTrue);
+      expect(names.any((n) => n.startsWith('notes/') && n.endsWith('.md')),
+          isTrue);
       expect(names, contains('index.json'));
       expect(names, contains('vault/vault.json'));
-      expect(names.any((n) => n.startsWith('vault/items/') && n.endsWith('.mdenc')), isTrue);
+      expect(
+          names
+              .any((n) => n.startsWith('vault/items/') && n.endsWith('.mdenc')),
+          isTrue);
 
       // vault.json 里绝不能带机器绑定的密钥
       final meta = _zipEntryBytes(zip.readAsBytesSync(), 'vault/vault.json');
@@ -292,7 +299,8 @@ void main() {
       final secret = VaultStore(vault)..load();
       secret.save(secret.create(title: '私密', content: '私密内容'));
 
-      final target = Directory(p.join(tmpRoot.path, 'onedrive'))..createSync(recursive: true);
+      final target = Directory(p.join(tmpRoot.path, 'onedrive'))
+        ..createSync(recursive: true);
       final config = Config(paths.configPath)..load();
       config.set('onedrive.enabled', true);
       config.set('onedrive.folder', target.path);
@@ -313,7 +321,8 @@ void main() {
       expect(meta.existsSync(), isTrue);
       expect(meta.readAsStringSync().contains('dpapi_key'), isFalse);
       // 明文笔记内容不应该出现在私密库里，反之亦然
-      final plainText = notes.listSync().whereType<File>().first.readAsStringSync();
+      final plainText =
+          notes.listSync().whereType<File>().first.readAsStringSync();
       expect(plainText.contains('普通内容'), isTrue);
       expect(plainText.contains('私密内容'), isFalse);
     });
@@ -364,7 +373,8 @@ List<int> _zipEntryBytes(List<int> bytes, String name) {
     final nameLen = view.getUint16(offset + 28, Endian.little);
     final extraLen = view.getUint16(offset + 30, Endian.little);
     final commentLen = view.getUint16(offset + 32, Endian.little);
-    final entryName = utf8.decode(bytes.sublist(offset + 46, offset + 46 + nameLen));
+    final entryName =
+        utf8.decode(bytes.sublist(offset + 46, offset + 46 + nameLen));
     final localOffset = view.getUint32(offset + 42, Endian.little);
     final size = view.getUint32(offset + 24, Endian.little);
     if (entryName == name) {

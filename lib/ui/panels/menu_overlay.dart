@@ -68,18 +68,22 @@ class MenuOverlay extends StatelessWidget {
           state.moveCurrentBetweenLibraries();
         })),
       const _Item.separator(),
-      _Item.action(MenuAction('导出为 Markdown…', () {
-        onClose();
-        onExport();
-      }, shortcut: ''), enabled: hasNote),
+      _Item.action(
+          MenuAction('导出为 Markdown…', () {
+            onClose();
+            onExport();
+          }, shortcut: ''),
+          enabled: hasNote),
       _Item.action(MenuAction('打开数据文件夹', () {
         onClose();
         onOpenDataDir();
       })),
-      _Item.action(MenuAction('删除当前便签', () {
-        onClose();
-        onDelete();
-      }, shortcut: 'Ctrl+D'), enabled: hasNote),
+      _Item.action(
+          MenuAction('删除当前便签', () {
+            onClose();
+            onDelete();
+          }, shortcut: 'Ctrl+D'),
+          enabled: hasNote),
       _Item.action(MenuAction('回收站…', () {
         onClose();
         onOpenTrash();
@@ -101,14 +105,20 @@ class MenuOverlay extends StatelessWidget {
 
     return Stack(
       children: [
-        Positioned.fill(
+        // 只在下拉框以下铺一层点击关闭区：覆盖整窗的话，顶栏那三个胶囊
+        // （预览/备份/⋯）会被它挡住，点了没反应。
+        Positioned(
+          left: 0,
+          right: 0,
+          top: _menuTop,
+          bottom: 0,
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTap: onClose,
           ),
         ),
         Positioned(
-          top: 46,
+          top: _menuTop,
           right: 16,
           child: Material(
             color: Colors.transparent,
@@ -134,7 +144,8 @@ class MenuOverlay extends StatelessWidget {
                   for (final item in entries)
                     if (item.separator)
                       const Padding(
-                        padding: EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                        padding:
+                            EdgeInsets.symmetric(horizontal: 12, vertical: 4),
                         child: Divider(color: Palette.border, height: 1),
                       )
                     else
@@ -149,12 +160,16 @@ class MenuOverlay extends StatelessWidget {
   }
 }
 
+/// 卡片顶边：标题栏(34) + 内边距(12) + 下拉框(30) = 76，留 2px 呼吸。
+const double _menuTop = 78;
+
 class _Item {
   final MenuAction? action;
   final bool separator;
   final bool enabled;
 
-  _Item.action(MenuAction this.action, {this.enabled = true}) : separator = false;
+  _Item.action(MenuAction this.action, {this.enabled = true})
+      : separator = false;
 
   const _Item.separator()
       : action = null,
@@ -203,7 +218,9 @@ class _MenuRowState extends State<_MenuRow> {
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontSize: 12.5,
-                    color: enabled ? Palette.fg : Palette.muted.withValues(alpha: 0.55),
+                    color: enabled
+                        ? Palette.fg
+                        : Palette.muted.withValues(alpha: 0.55),
                   ),
                 ),
               ),

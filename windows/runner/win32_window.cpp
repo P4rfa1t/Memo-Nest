@@ -16,6 +16,20 @@ namespace {
 #define DWMWA_USE_IMMERSIVE_DARK_MODE 20
 #endif
 
+/// Window attributes used to blend the frame into the app's paper palette.
+/// Redefined here because the Windows SDK headers on some machines predate
+/// them (DWMWA_BORDER_COLOR: 10.0.22000, DWMWA_WINDOW_CORNER_PREFERENCE:
+/// 10.0.22000).
+#ifndef DWMWA_BORDER_COLOR
+#define DWMWA_BORDER_COLOR 34
+#endif
+#ifndef DWMWA_WINDOW_CORNER_PREFERENCE
+#define DWMWA_WINDOW_CORNER_PREFERENCE 33
+#endif
+#ifndef DWMWCP_ROUND
+#define DWMWCP_ROUND 2
+#endif
+
 constexpr const wchar_t kWindowClassName[] = L"FLUTTER_RUNNER_WIN32_WINDOW";
 
 /// Registry key for app theme preference.
@@ -137,7 +151,11 @@ bool Win32Window::Create(const std::wstring& title,
   double scale_factor = dpi / 96.0;
 
   HWND window = CreateWindow(
-      window_class, title.c_str(), WS_OVERLAPPEDWINDOW,
+      window_class, title.c_str(),
+      // 标题栏由 Flutter 画（TitleBarStyle.hidden），保留 WS_CAPTION 让系统
+      // 仍然做阴影、贴边吸附、Win+方向键这些窗口管理，DWM 只负责按主题
+      // 上色和圆角。WS_THICKFRAME 保留是为了可拖动改变大小。
+      WS_OVERLAPPEDWINDOW,
       Scale(origin.x, scale_factor), Scale(origin.y, scale_factor),
       Scale(size.width, scale_factor), Scale(size.height, scale_factor),
       nullptr, nullptr, GetModuleHandle(nullptr), this);
@@ -287,4 +305,14 @@ void Win32Window::UpdateTheme(HWND const window) {
     DwmSetWindowAttribute(window, DWMWA_USE_IMMERSIVE_DARK_MODE,
                           &enable_dark_mode, sizeof(enable_dark_mode));
   }
+
+  // 标题栏交给 Flutter 自己画，系统只需描一圈和纸面同调的边框 + 圆角，
+  // 否则无边框窗口在 Win10 上会留下一道纯黑 1px 外框。
+  const COLORREF border_color = RGB(0xDC, 0xC8, 0x88);
+  DwmSetWindowAttribute(window, DWMWA_BORDER_COLOR, &border_color,
+                        sizeof(border_color));
+
+  const DWORD corner_preference = DWMWCP_ROUND;
+  DwmSetWindowAttribute(window, DWMWA_WINDOW_CORNER_PREFERENCE,
+                        &corner_preference, sizeof(corner_preference));
 }

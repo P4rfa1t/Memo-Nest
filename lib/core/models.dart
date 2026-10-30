@@ -20,7 +20,8 @@ String fmtTime(String value, {bool short = true}) {
   final dt = parseTime(value);
   final now = DateTime.now();
   String two(int v) => v.toString().padLeft(2, '0');
-  final sameDay = dt.year == now.year && dt.month == now.month && dt.day == now.day;
+  final sameDay =
+      dt.year == now.year && dt.month == now.month && dt.day == now.day;
   if (sameDay) return '今天 ${two(dt.hour)}:${two(dt.minute)}';
   if (dt.year == now.year) {
     return short

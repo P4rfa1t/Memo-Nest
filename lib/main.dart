@@ -17,7 +17,7 @@ Future<void> main() async {
     minimumSize: Size(380, 420),
     center: true,
     backgroundColor: Palette.bg,
-    titleBarStyle: TitleBarStyle.normal,
+    titleBarStyle: TitleBarStyle.hidden,
     title: 'MemoNest 备忘录',
     skipTaskbar: false,
   );
@@ -39,12 +39,14 @@ Future<void> main() async {
 /// 两个版本互相切换时窗口位置与大小能延续。
 Future<void> _applyWindowPrefs(AppState state) async {
   try {
-    final alwaysOnTop = state.config.get('general.always_on_top', false) == true;
+    final alwaysOnTop =
+        state.config.get('general.always_on_top', false) == true;
     await windowManager.setAlwaysOnTop(alwaysOnTop);
 
     final geometry = state.config.get('general.window_geometry');
     if (geometry is String) {
-      final match = RegExp(r'^(\d+)x(\d+)([+-]\d+)([+-]\d+)?$').firstMatch(geometry);
+      final match =
+          RegExp(r'^(\d+)x(\d+)([+-]\d+)([+-]\d+)?$').firstMatch(geometry);
       if (match != null) {
         final w = int.tryParse(match.group(1) ?? '');
         final h = int.tryParse(match.group(2) ?? '');
@@ -90,6 +92,10 @@ class _MemoNestAppState extends State<MemoNestApp> with WindowListener {
     // 先落盘、再记住窗口几何，最后才真正退出。
     try {
       widget.state.saveCurrent(force: true);
+      // 最大化状态下 getSize 返回的是最大化后的尺寸，记下来会让下次启动
+      // 打开成一个「比屏幕还大」的普通窗口，所以还原一次再取。
+      final maximized = await windowManager.isMaximized();
+      if (maximized) await windowManager.unmaximize();
       final size = await windowManager.getSize();
       final pos = await windowManager.getPosition();
       widget.state.config.set(
@@ -105,6 +111,12 @@ class _MemoNestAppState extends State<MemoNestApp> with WindowListener {
     widget.state.disposeState();
     await windowManager.destroy();
   }
+
+  @override
+  void onWindowMaximize() => widget.state.setMaximized(true);
+
+  @override
+  void onWindowUnmaximize() => widget.state.setMaximized(false);
 
   @override
   Widget build(BuildContext context) {

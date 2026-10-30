@@ -40,23 +40,31 @@ class GitHubService {
 
     final workDir = Directory(paths.vaultMetaPath).existsSync()
         ? _stageSource()
-        : Directory(paths.notesDir)..createSync(recursive: true);
+        : Directory(paths.notesDir)
+      ..createSync(recursive: true);
 
     if (!Directory(p.join(workDir.path, '.git')).existsSync()) {
       _git(git, ['init', '-b', useBranch], workDir);
     }
-    _git(git, [
-      'config',
-      'user.name',
-      '${config.get('github.author_name', 'MemoNest')}',
-    ], workDir);
-    _git(git, [
-      'config',
-      'user.email',
-      '${config.get('github.author_email', 'memonest@localhost')}',
-    ], workDir);
+    _git(
+        git,
+        [
+          'config',
+          'user.name',
+          '${config.get('github.author_name', 'MemoNest')}',
+        ],
+        workDir);
+    _git(
+        git,
+        [
+          'config',
+          'user.email',
+          '${config.get('github.author_email', 'memonest@localhost')}',
+        ],
+        workDir);
 
-    final remotes = _git(git, ['remote'], workDir).stdout.toString().split(RegExp(r'\s+'));
+    final remotes =
+        _git(git, ['remote'], workDir).stdout.toString().split(RegExp(r'\s+'));
     if (remotes.contains('origin')) {
       _git(git, ['remote', 'set-url', 'origin', plain], workDir);
     } else {
@@ -64,7 +72,8 @@ class GitHubService {
     }
 
     _git(git, ['add', '-A'], workDir);
-    final staged = _git(git, ['diff', '--cached', '--quiet'], workDir, check: false);
+    final staged =
+        _git(git, ['diff', '--cached', '--quiet'], workDir, check: false);
     var committed = false;
     if (staged.exitCode != 0) {
       final now = DateTime.now();
@@ -75,28 +84,35 @@ class GitHubService {
       committed = true;
     }
 
-    var push = _git(git, ['push', url, 'HEAD:$useBranch'], workDir, check: false);
+    var push =
+        _git(git, ['push', url, 'HEAD:$useBranch'], workDir, check: false);
     if (push.exitCode != 0) {
       final output = '${push.stderr}\n${push.stdout}'.toLowerCase();
       if (output.contains('rejected') ||
           output.contains('fetch first') ||
           output.contains('non-fast-forward')) {
         _git(git, ['fetch', url, useBranch], workDir, check: false);
-        _git(git, [
-          'merge',
-          '--allow-unrelated-histories',
-          '--no-edit',
-          '-X',
-          'ours',
-          'FETCH_HEAD',
-        ], workDir, check: false);
-        push = _git(git, ['push', url, 'HEAD:$useBranch'], workDir, check: false);
+        _git(
+            git,
+            [
+              'merge',
+              '--allow-unrelated-histories',
+              '--no-edit',
+              '-X',
+              'ours',
+              'FETCH_HEAD',
+            ],
+            workDir,
+            check: false);
+        push =
+            _git(git, ['push', url, 'HEAD:$useBranch'], workDir, check: false);
       }
       if (push.exitCode != 0) {
         final raw = '${push.stderr}'.trim().isEmpty
             ? '${push.stdout}'.trim()
             : '${push.stderr}'.trim();
-        final lines = raw.split('\n').where((l) => l.trim().isNotEmpty).toList();
+        final lines =
+            raw.split('\n').where((l) => l.trim().isNotEmpty).toList();
         final detail = lines.isEmpty ? '推送失败' : lines.last;
         throw GitHubError('GitHub 推送失败：${_plainRemote(detail)}');
       }
@@ -108,7 +124,8 @@ class GitHubService {
 
   /// 拼出带 token 的推送地址。token 只在这个字符串里存在。
   String _remoteUrl() {
-    final custom = (config.get('github.remote_url', '') as String?)?.trim() ?? '';
+    final custom =
+        (config.get('github.remote_url', '') as String?)?.trim() ?? '';
     final repo = (config.get('github.repo', '') as String?)?.trim() ?? '';
     final token = (config.get('github.token', '') as String?)?.trim() ?? '';
     if (custom.isNotEmpty) {

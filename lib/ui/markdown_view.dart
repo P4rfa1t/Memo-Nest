@@ -27,7 +27,8 @@ class MarkdownView extends StatelessWidget {
     final blocks = parseBlocks(source);
     if (blocks.isEmpty) {
       return const Center(
-        child: Text('这里还没有内容', style: TextStyle(color: Palette.muted, fontSize: 13)),
+        child: Text('这里还没有内容',
+            style: TextStyle(color: Palette.muted, fontSize: 13)),
       );
     }
     return SelectionArea(
@@ -63,7 +64,8 @@ class MarkdownView extends StatelessWidget {
           child: _inline(
             context,
             block.text,
-            baseStyle: const TextStyle(fontSize: 13.5, height: 1.62, color: Palette.fg),
+            baseStyle: const TextStyle(
+                fontSize: 13.5, height: 1.62, color: Palette.fg),
           ),
         );
 
@@ -163,7 +165,8 @@ class MarkdownView extends StatelessWidget {
                 children: [
                   for (final cell in block.header)
                     Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 5),
                       child: Text(
                         cell,
                         style: const TextStyle(
@@ -180,10 +183,12 @@ class MarkdownView extends StatelessWidget {
                   children: [
                     for (final cell in row)
                       Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 8, vertical: 5),
                         child: Text(
                           cell,
-                          style: const TextStyle(fontSize: 12.5, color: Palette.fg),
+                          style: const TextStyle(
+                              fontSize: 12.5, color: Palette.fg),
                         ),
                       ),
                   ],
@@ -238,7 +243,9 @@ class MarkdownView extends StatelessWidget {
   File? _resolveImage(String src) {
     if (src.isEmpty) return null;
     final lower = src.toLowerCase();
-    if (lower.startsWith('http://') || lower.startsWith('https://')) return null;
+    if (lower.startsWith('http://') || lower.startsWith('https://')) {
+      return null;
+    }
     var path = src;
     if (!p.isAbsolute(path)) {
       final base = baseDir;
@@ -250,7 +257,8 @@ class MarkdownView extends StatelessWidget {
   }
 
   /// 行内样式渲染：按 span 的样式表拼 TextSpan，链接可点击。
-  Widget _inline(BuildContext context, String text, {required TextStyle baseStyle}) {
+  Widget _inline(BuildContext context, String text,
+      {required TextStyle baseStyle}) {
     final spans = parseInline(text);
     if (spans.isEmpty) {
       return Text('', style: baseStyle);
@@ -268,7 +276,9 @@ class MarkdownView extends StatelessWidget {
     var style = baseStyle;
     if (span.bold) style = style.copyWith(fontWeight: FontWeight.w700);
     if (span.italic) style = style.copyWith(fontStyle: FontStyle.italic);
-    if (span.strike) style = style.copyWith(decoration: TextDecoration.lineThrough);
+    if (span.strike) {
+      style = style.copyWith(decoration: TextDecoration.lineThrough);
+    }
     if (span.code) {
       style = style.copyWith(
         fontFamily: kMonoFont,
@@ -278,7 +288,8 @@ class MarkdownView extends StatelessWidget {
       );
     }
     if (span.link) {
-      style = style.copyWith(color: Palette.link, decoration: TextDecoration.underline);
+      style = style.copyWith(
+          color: Palette.link, decoration: TextDecoration.underline);
       final url = span.url;
       if (url == null || url.isEmpty) {
         return TextSpan(text: span.text, style: style);
@@ -286,8 +297,7 @@ class MarkdownView extends StatelessWidget {
       return TextSpan(
         text: span.text,
         style: style,
-        recognizer: TapGestureRecognizer()
-          ..onTap = () => _openUrl(url),
+        recognizer: TapGestureRecognizer()..onTap = () => _openUrl(url),
       );
     }
     return TextSpan(text: span.text, style: style);

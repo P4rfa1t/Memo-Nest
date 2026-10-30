@@ -23,7 +23,8 @@ class BackupResult {
   final int noteCount;
   final String label;
 
-  BackupResult({required this.path, required this.noteCount, required this.label});
+  BackupResult(
+      {required this.path, required this.noteCount, required this.label});
 }
 
 /// 把 notes 目录打成 zip 快照，写到 backups/ 下。
@@ -54,7 +55,8 @@ class BackupService {
           .toList()
         ..sort((a, b) => a.path.compareTo(b.path));
       for (final file in notes) {
-        entries.add(_ZipEntry('notes/${p.basename(file.path)}', file.readAsBytesSync()));
+        entries.add(_ZipEntry(
+            'notes/${p.basename(file.path)}', file.readAsBytesSync()));
       }
     }
 
@@ -73,7 +75,8 @@ class BackupService {
         ..sort((a, b) => a.path.compareTo(b.path));
       for (final file in items) {
         entries.add(
-          _ZipEntry('vault/items/${p.basename(file.path)}', file.readAsBytesSync()),
+          _ZipEntry(
+              'vault/items/${p.basename(file.path)}', file.readAsBytesSync()),
         );
       }
     }
@@ -111,7 +114,8 @@ class BackupService {
 
   /// 按 keep 数量清理旧备份。
   void prune({int? keep}) {
-    final limit = keep ?? (config.get('general.keep_backups', 20) as num).toInt();
+    final limit =
+        keep ?? (config.get('general.keep_backups', 20) as num).toInt();
     if (limit <= 0) return;
     final dir = Directory(paths.backupDir);
     if (!dir.existsSync()) return;
@@ -139,7 +143,8 @@ class BackupService {
     if (!enabled) return null;
     final folder = _resolveFolder();
     if (folder == null) return null;
-    final sub = (config.get('onedrive.subfolder', 'MemoNest备份') as String?) ?? '';
+    final sub =
+        (config.get('onedrive.subfolder', 'MemoNest备份') as String?) ?? '';
     final target = Directory(p.join(folder.path, sub));
     var copied = 0;
     try {
@@ -217,7 +222,8 @@ class BackupService {
 
       final snapshot = createSnapshot(label: 'onedrive');
       snapshot.copySync(p.join(target.path, p.basename(snapshot.path)));
-      _pruneFolder(target, int.tryParse('${config.get('onedrive.keep_backups', 30)}') ?? 30);
+      _pruneFolder(target,
+          int.tryParse('${config.get('onedrive.keep_backups', 30)}') ?? 30);
       return '已同步 $copied 篇笔记到 ${target.path}';
     } on FileSystemException catch (e) {
       throw BackupError('复制到 OneDrive 失败：${e.message}');
@@ -246,7 +252,8 @@ class BackupService {
         .where((f) => f.path.toLowerCase().endsWith('.zip'))
         .toList()
       ..sort((a, b) => a.path.compareTo(b.path));
-    for (final stale in zips.take(zips.length - keep < 0 ? 0 : zips.length - keep)) {
+    for (final stale
+        in zips.take(zips.length - keep < 0 ? 0 : zips.length - keep)) {
       try {
         stale.deleteSync();
       } on FileSystemException {

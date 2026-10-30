@@ -41,14 +41,16 @@ class AppState extends ChangeNotifier {
   VaultPanelMode vaultPanelMode = VaultPanelMode.none;
   String statusMessage = '';
 
+  /// 窗口是否最大化：自绘标题栏靠它决定中间那颗按钮画「方块」还是「还原」。
+  bool maximized = false;
+
   Timer? _autosave;
   Timer? _backupTimer;
   bool _dirty = false;
   bool _loading = false;
   bool _dirtySinceBackup = false;
 
-  AppState({AppPaths? paths})
-      : paths = paths ?? AppPaths() {
+  AppState({AppPaths? paths}) : paths = paths ?? AppPaths() {
     config = Config(this.paths.configPath);
     this.paths.ensureDirs();
     plainStore = NoteStore.fromPaths(this.paths);
@@ -83,7 +85,8 @@ class AppState extends ChangeNotifier {
       vault = Vault(paths.vaultDir);
     }
     if (plainStore.allNotes().isEmpty) {
-      final welcome = plainStore.create(title: '欢迎使用 MemoNest', content: welcomeText);
+      final welcome =
+          plainStore.create(title: '欢迎使用 MemoNest', content: welcomeText);
       current = welcome;
       plainStore.save(welcome);
     } else {
@@ -221,7 +224,9 @@ class AppState extends ChangeNotifier {
     vaultPanelOpen = false;
     vaultPanelMode = VaultPanelMode.none;
     final s = vaultStore!;
-    current = s.allNotes().isEmpty ? s.create(title: '私密便签', content: '') : s.allNotes().first;
+    current = s.allNotes().isEmpty
+        ? s.create(title: '私密便签', content: '')
+        : s.allNotes().first;
     notifyListeners();
   }
 
@@ -244,7 +249,8 @@ class AppState extends ChangeNotifier {
     vaultStore = null;
     if (library == LibraryKind.vault) {
       library = LibraryKind.notes;
-      current = plainStore.allNotes().isEmpty ? null : plainStore.allNotes().first;
+      current =
+          plainStore.allNotes().isEmpty ? null : plainStore.allNotes().first;
     }
     notifyListeners();
   }
@@ -263,7 +269,8 @@ class AppState extends ChangeNotifier {
     vaultStore = null;
     if (library == LibraryKind.vault) {
       library = LibraryKind.notes;
-      current = plainStore.allNotes().isEmpty ? null : plainStore.allNotes().first;
+      current =
+          plainStore.allNotes().isEmpty ? null : plainStore.allNotes().first;
     }
     vaultPanelOpen = false;
     vaultPanelMode = VaultPanelMode.none;
@@ -345,7 +352,8 @@ class AppState extends ChangeNotifier {
   void deleteTrash(TrashEntry entry) {
     try {
       File(entry.path).deleteSync();
-      final meta = File(entry.path.replaceAll(RegExp(r'\.(md|mdenc)$'), '.json'));
+      final meta =
+          File(entry.path.replaceAll(RegExp(r'\.(md|mdenc)$'), '.json'));
       if (meta.existsSync()) meta.deleteSync();
     } on FileSystemException {
       // 忽略
@@ -400,7 +408,8 @@ class AppState extends ChangeNotifier {
 
   void _startBackupTimer() {
     _backupTimer?.cancel();
-    final minutes = (config.get('general.auto_backup_minutes', 0) as num).toInt();
+    final minutes =
+        (config.get('general.auto_backup_minutes', 0) as num).toInt();
     if (minutes <= 0) return;
     _backupTimer = Timer.periodic(
       Duration(minutes: minutes),
@@ -417,6 +426,38 @@ class AppState extends ChangeNotifier {
 
   /// UI 侧改完公开字段后调它，把变更广播出去。
   void refresh() => notifyListeners();
+
+  void setMaximized(bool value) {
+    if (maximized == value) return;
+    maximized = value;
+    notifyListeners();
+  }
+
+  // ---------- 窗口拖动 ----------
+  // 自绘标题栏后没有 NCHITTEST 的系统拖动区。用 window_manager 的
+  // `startDragging` 的话，Windows 自己接管了鼠标循环，松手前不会再有任何
+  // 鼠标事件回到 Dart 侧——分不清「单击」和「拖完松手」，于是点标题栏会误
+  // 触发双击最大化。这里改成自己跟踪：按下时记住起点，移动超过阈值才判定
+  // 为拖动，松手后 300ms 内落下第二次单击才算双击。
+
+  double? _titleBarPressX;
+  double? _titleBarPressY;
+
+  void noteTitleBarPress(double x, double y) {
+    _titleBarPressX = x;
+    _titleBarPressY = y;
+  }
+
+  (double, double)? get titleBarPressOrigin {
+    final x = _titleBarPressX;
+    final y = _titleBarPressY;
+    return (x == null || y == null) ? null : (x, y);
+  }
+
+  void clearTitleBarPress() {
+    _titleBarPressX = null;
+    _titleBarPressY = null;
+  }
 
   // ---------- 生命周期 ----------
   void setLoading(bool value) {

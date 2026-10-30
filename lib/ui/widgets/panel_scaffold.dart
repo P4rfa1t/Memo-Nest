@@ -34,7 +34,8 @@ class PanelScaffold extends StatelessWidget {
         ),
         Center(
           child: ConstrainedBox(
-            constraints: BoxConstraints(maxWidth: maxWidth, maxHeight: maxHeight),
+            constraints:
+                BoxConstraints(maxWidth: maxWidth, maxHeight: maxHeight),
             child: Material(
               color: Colors.transparent,
               child: Container(

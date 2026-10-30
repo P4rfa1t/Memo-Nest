@@ -388,8 +388,9 @@ class VaultStore implements NotesStore {
     }
     if (needle.isEmpty) return result;
     return result
-        .where((n) =>
-            '${n.title}\n${n.tags.join(' ')}\n${n.content}'.toLowerCase().contains(needle))
+        .where((n) => '${n.title}\n${n.tags.join(' ')}\n${n.content}'
+            .toLowerCase()
+            .contains(needle))
         .toList();
   }
 

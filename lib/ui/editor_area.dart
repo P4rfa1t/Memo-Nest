@@ -104,7 +104,8 @@ class _EditorAreaState extends State<EditorArea> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.sticky_note_2_outlined, size: 34, color: Palette.muted),
+            const Icon(Icons.sticky_note_2_outlined,
+                size: 34, color: Palette.muted),
             const SizedBox(height: 10),
             const Text(
               '还没有便签',
@@ -157,13 +158,15 @@ class _EditorAreaState extends State<EditorArea> {
           padding: const EdgeInsets.fromLTRB(14, 0, 14, 0),
           child: Row(
             children: [
-              const Text('#', style: TextStyle(fontSize: 11.5, color: Palette.muted)),
+              const Text('#',
+                  style: TextStyle(fontSize: 11.5, color: Palette.muted)),
               const SizedBox(width: 5),
               Expanded(
                 child: TextField(
                   controller: _tagsController,
                   focusNode: _tagsFocus,
-                  style: const TextStyle(fontSize: 11, color: Palette.muted, height: 1.4),
+                  style: const TextStyle(
+                      fontSize: 11, color: Palette.muted, height: 1.4),
                   decoration: const InputDecoration(
                     isDense: true,
                     filled: false,
@@ -172,7 +175,8 @@ class _EditorAreaState extends State<EditorArea> {
                     focusedBorder: InputBorder.none,
                     contentPadding: EdgeInsets.symmetric(vertical: 3),
                     hintText: '添加标签，用逗号分隔',
-                    hintStyle: TextStyle(fontSize: 11, color: Color(0xFFC9BC8C)),
+                    hintStyle:
+                        TextStyle(fontSize: 11, color: Color(0xFFC9BC8C)),
                   ),
                   textInputAction: TextInputAction.next,
                   onSubmitted: (_) => _bodyFocus.requestFocus(),
@@ -204,8 +208,8 @@ class _EditorAreaState extends State<EditorArea> {
   Widget _buildBodyField() {
     return CallbackShortcuts(
       bindings: <ShortcutActivator, VoidCallback>{
-        const SingleActivator(LogicalKeyboardKey.keyV, control: true, shift: true):
-            _pasteImage,
+        const SingleActivator(LogicalKeyboardKey.keyV,
+            control: true, shift: true): _pasteImage,
       },
       child: TextField(
         controller: _bodyController,
@@ -236,9 +240,11 @@ class _EditorAreaState extends State<EditorArea> {
   }
 
   /// 右键菜单：自绘卡片，条目状态跟随选区与剪贴板。
-  Widget _buildContextMenu(BuildContext context, EditableTextState editableTextState) {
+  Widget _buildContextMenu(
+      BuildContext context, EditableTextState editableTextState) {
     final value = editableTextState.textEditingValue;
-    final hasSelection = value.selection.isValid && !value.selection.isCollapsed;
+    final hasSelection =
+        value.selection.isValid && !value.selection.isCollapsed;
     final canUndo = _undo.value.canUndo;
     final canRedo = _undo.value.canRedo;
     final hasImage = clipboardHasImage();
@@ -247,10 +253,20 @@ class _EditorAreaState extends State<EditorArea> {
       _MenuEntry('撤销', 'Ctrl+Z', canUndo ? () => _undo.undo() : null),
       _MenuEntry('重做', 'Ctrl+Y', canRedo ? () => _undo.redo() : null),
       const _MenuEntry.separator(),
-      _MenuEntry('剪切', 'Ctrl+X',
-          hasSelection ? () => editableTextState.cutSelection(SelectionChangedCause.toolbar) : null),
-      _MenuEntry('复制', 'Ctrl+C',
-          hasSelection ? () => editableTextState.copySelection(SelectionChangedCause.toolbar) : null),
+      _MenuEntry(
+          '剪切',
+          'Ctrl+X',
+          hasSelection
+              ? () =>
+                  editableTextState.cutSelection(SelectionChangedCause.toolbar)
+              : null),
+      _MenuEntry(
+          '复制',
+          'Ctrl+C',
+          hasSelection
+              ? () =>
+                  editableTextState.copySelection(SelectionChangedCause.toolbar)
+              : null),
       _MenuEntry('粘贴', 'Ctrl+V',
           () => editableTextState.pasteText(SelectionChangedCause.toolbar)),
       _MenuEntry('粘贴图片', 'Ctrl+Shift+V', hasImage ? _pasteImage : null),
@@ -431,7 +447,8 @@ class _ContextMenuCardState extends State<_ContextMenuCard> {
                   for (var i = 0; i < widget.entries.length; i++)
                     widget.entries[i].separator
                         ? const Padding(
-                            padding: EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                            padding: EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 4),
                             child: Divider(color: Palette.border, height: 1),
                           )
                         : _buildRow(i, widget.entries[i]),
@@ -447,7 +464,8 @@ class _ContextMenuCardState extends State<_ContextMenuCard> {
   Widget _buildRow(int index, _MenuEntry entry) {
     final hovered = _hover == index && entry.enabled;
     return MouseRegion(
-      cursor: entry.enabled ? SystemMouseCursors.click : SystemMouseCursors.basic,
+      cursor:
+          entry.enabled ? SystemMouseCursors.click : SystemMouseCursors.basic,
       onEnter: (_) => setState(() => _hover = index),
       onExit: (_) => setState(() => _hover = -1),
       child: GestureDetector(
@@ -471,7 +489,9 @@ class _ContextMenuCardState extends State<_ContextMenuCard> {
                 entry.label,
                 style: TextStyle(
                   fontSize: 12.5,
-                  color: entry.enabled ? Palette.fg : Palette.muted.withValues(alpha: 0.55),
+                  color: entry.enabled
+                      ? Palette.fg
+                      : Palette.muted.withValues(alpha: 0.55),
                 ),
               ),
               const Spacer(),
@@ -480,7 +500,8 @@ class _ContextMenuCardState extends State<_ContextMenuCard> {
                   entry.shortcut,
                   style: TextStyle(
                     fontSize: 10.5,
-                    color: Palette.muted.withValues(alpha: entry.enabled ? 1 : 0.5),
+                    color: Palette.muted
+                        .withValues(alpha: entry.enabled ? 1 : 0.5),
                   ),
                 ),
             ],

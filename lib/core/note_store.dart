@@ -196,7 +196,8 @@ class NoteStore implements NotesStore {
     final source = File(p.join(notesDir, note.filename));
     if (source.existsSync()) {
       final stamp = _stampNow();
-      final target = p.join(trashDir, '${p.basenameWithoutExtension(source.path)}-$stamp.md');
+      final target = p.join(
+          trashDir, '${p.basenameWithoutExtension(source.path)}-$stamp.md');
       try {
         source.renameSync(target);
         // 标题写在 index.json 里，正文不一定有，留一份旁注回收站才显示得对
@@ -309,8 +310,9 @@ class NoteStore implements NotesStore {
     }
     if (needle.isEmpty) return result;
     return result
-        .where((n) =>
-            '${n.title}\n${n.tags.join(' ')}\n${n.content}'.toLowerCase().contains(needle))
+        .where((n) => '${n.title}\n${n.tags.join(' ')}\n${n.content}'
+            .toLowerCase()
+            .contains(needle))
         .toList();
   }
 

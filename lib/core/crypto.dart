@@ -123,9 +123,7 @@ String keyTag(Uint8List key) {
   final digest = SHA256Digest().process(
     Uint8List.fromList([...ascii.encode('memonest-key-tag'), ...key]),
   );
-  final hex = digest
-      .map((b) => b.toRadixString(16).padLeft(2, '0'))
-      .join();
+  final hex = digest.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
   return hex.substring(0, 16);
 }
 

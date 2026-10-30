@@ -37,7 +37,8 @@ void main(List<String> args) {
   final zip = BackupService(paths, config).createSnapshot();
   stdout.writeln('DART-ZIP ${zip.path} ${zip.lengthSync()}');
 
-  final mirrorRoot = Directory('${root.path}/onedrive')..createSync(recursive: true);
+  final mirrorRoot = Directory('${root.path}/onedrive')
+    ..createSync(recursive: true);
   config.set('onedrive.enabled', true);
   config.set('onedrive.folder', mirrorRoot.path);
   final detail = BackupService(paths, config).mirrorToFolder();

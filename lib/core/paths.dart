@@ -159,7 +159,8 @@ class Config {
   }
 }
 
-Map<String, dynamic> _merge(Map<String, dynamic> base, Map<String, dynamic> override) {
+Map<String, dynamic> _merge(
+    Map<String, dynamic> base, Map<String, dynamic> override) {
   for (final entry in override.entries) {
     final existing = base[entry.key];
     final incoming = entry.value;

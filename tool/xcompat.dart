@@ -29,7 +29,8 @@ void main(List<String> args) {
   final notes = store.allNotes();
   stdout.writeln('DART-READ count=${notes.length}');
   for (final note in notes) {
-    stdout.writeln('DART-NOTE id=${note.id} title=${note.title} content=${jsonEncode(note.content)}');
+    stdout.writeln(
+        'DART-NOTE id=${note.id} title=${note.title} content=${jsonEncode(note.content)}');
   }
 
   final fresh = store.create(title: '来自 Flutter', content: 'Flutter 写的私密内容');
