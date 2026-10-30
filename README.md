@@ -10,13 +10,25 @@ Tk 版的布局，所以旧的 `data/` 目录可以直接拿来用，不用迁�
 - **本地文件夹**：把备份复制进 OneDrive 同步文件夹（`%OneDrive%` 或手填路径），
   由 OneDrive 客户端负责上传，不需要登录。
 - **账号登录**：走 Microsoft Graph，直接传到云端，不依赖本机 OneDrive 客户端。
-  用 OAuth2 设备代码流登录——填一个 Azure 应用（客户端）ID，点「登录」，
-  面板上出一个 8 位代码，在浏览器里输进去即可。令牌存本地 `config.json`，
-  过期自动用 `refresh_token` 续。
+  填一个 Azure 应用（客户端）ID 后点「登录」，会在本机开一个回环端口并调起浏览器，
+  授权完自动回调，不用抄设备码；浏览器调不起来时点下面的「改用设备代码登录」兜底。
+  令牌存本地 `config.json`，过期自动用 `refresh_token` 续。
 
-Graph 模式上传的内容与文件夹模式一致：`notes/*.md` 明文镜像、`index.json`、
-`vault/items/*.mdenc` 密文与去掉 `dpapi_key` 的 `vault.json`，以及
-`memo-backup-*.zip` 快照（按「云端保留备份数」清理旧的）。私密库密钥始终留在本机。
+Graph 模式的同步逻辑与 Obsidian 的 Remotely Save 一致：本地记一份
+`data/onedrive-sync.json` 基线（相对路径 → `大小:mtime`），每次只传变化的文件，
+本地上次有、这次没有的就从云端删掉。所以它更接近双向同步而不是整包备份。
+
+同步范围可选两种，在设置里切：
+
+- **App 文件夹**（默认，权限最小）：`Files.ReadWrite.AppFolder`，云端落在
+  `Apps/MemoNest/`，微软分配的独立目录，应用看不到云盘其它内容。
+- **整个 OneDrive**：`Files.ReadWrite`，落在云盘根目录的 `MemoNest/`（子目录名可改），
+  和其它同步来的笔记平级。
+
+上传内容：`notes/*.md` 明文镜像（可在设置里关掉）、`notes/assets/` 里的图片、
+`index.json`、`vault/items/*.mdenc` 密文与去掉 `dpapi_key` 的 `vault.json`，
+以及 `memo-backup-*.zip` 快照（按「云端保留备份数」清理旧的）。私密库密钥始终留在本机。
+超过 250 MB 的单个文件走 `createUploadSession` 分块上传。
 
 ## 与 Python 版的兼容点
 

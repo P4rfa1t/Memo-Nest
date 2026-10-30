@@ -368,7 +368,7 @@ void main() {
       server.handler = (req) async {
         final map = json.decode(req.body) as Map<String, dynamic>;
         final name = '${map['name']}';
-        if (name == 'MemoNest备份') {
+        if (name == 'MemoNest') {
           // 第一级已存在
           return (
             409,
@@ -381,15 +381,17 @@ void main() {
         return (201, json.encode({'name': name}));
       };
 
-      await service.ensureFolder('MemoNest备份/notes');
+      await service.ensureFolder('MemoNest/notes');
 
       expect(created, ['notes']);
       expect(server.requests.length, 2);
-      // 第一级走 root/children，第二级走带路径的形式
-      expect(server.requests[0].path, '/graph/me/drive/root/children');
+      // 默认走 App 文件夹（权限最小）：第一级挂 approot/children，
+      // 第二级用 approot 里的带路径形式。
+      expect(
+          server.requests[0].path, '/graph/me/drive/special/approot/children');
       expect(
         server.requests[1].path,
-        contains('/me/drive/root:/MemoNest%E5%A4%87%E4%BB%BD:/children'),
+        contains('/me/drive/special/approot:/MemoNest:/children'),
       );
     });
 
@@ -413,7 +415,7 @@ void main() {
         ..writeAsBytesSync(utf8.encode('hello'));
       server.handler = (req) async => (201, json.encode({'id': 'x'}));
 
-      await service.uploadFile(local.path, 'MemoNest备份', name: '笔记 1.md');
+      await service.uploadFile(local.path, 'MemoNest', name: '笔记 1.md');
 
       final puts = server.where('PUT', '/content');
       // 目录创建 + 文件上传
@@ -423,24 +425,21 @@ void main() {
       expect(sent.auth, 'Bearer at');
     });
 
-    test('超过 250MB 直接报错，不发上传请求', () async {
-      final local = File(p.join(paths.dataDir, 'big.bin'));
-      // 不真的写 250MB，用稀疏文件
-      final raf = local.openSync(mode: FileMode.write);
-      raf.truncateSync(simpleUploadLimit + 1);
-      raf.closeSync();
-      addTearDown(() {
-        try {
-          local.deleteSync();
-        } on FileSystemException {
-          // 忽略
-        }
-      });
+    test('超过 Graph 250GB 硬上限直接报错，不发上传请求', () async {
+      server.handler = (req) async => (201, json.encode({'id': 'x'}));
+      // 不能真的截出 250GB（NTFS 稀疏文件也会被当成超额分配而报 errno 112），
+      // 改为把上限临时压到 10 字节，逻辑等价、代价可忽略。
+      final local = File(p.join(paths.dataDir, 'big.bin'))
+        ..writeAsBytesSync(List<int>.filled(64, 0));
 
-      expect(
-        () => service.uploadFile(local.path, 'x'),
+      await expectLater(
+        withUploadLimits(
+          simpleUploadLimit: 8,
+          maxUploadBytes: 32,
+          body: () => service.uploadFile(local.path, 'x'),
+        ),
         throwsA(isA<GraphError>()
-            .having((e) => e.message, 'message', contains('250MB'))),
+            .having((e) => e.message, 'message', contains('250GB'))),
       );
       expect(server.where('PUT', '/content'), isEmpty);
     });
@@ -489,6 +488,10 @@ void main() {
 
       File(p.join(paths.notesDir, 'a.md')).writeAsStringSync('# A');
       File(p.join(paths.notesDir, 'b.md')).writeAsStringSync('# B');
+      // 基线里记着上次同步过的 notes/c.md，本地已经删了 → 这次要从云端删掉。
+      // 不能靠「云端多出来的就删」判断，那会误删别的设备传上去的笔记。
+      File(p.join(paths.dataDir, 'onedrive-sync.json'))
+          .writeAsStringSync(json.encode({'notes/c.md': '9:1700000000000'}));
     });
 
     tearDown(() async => server.stop());
@@ -508,7 +511,7 @@ void main() {
               })
             );
           }
-          // 子目录下的旧备份（快照传在 MemoNest备份/ 里，清理也只看这里）
+          // 子目录下的旧备份（快照传在 MemoNest/ 里，清理也只看这里）
           return (
             200,
             json.encode({
@@ -535,7 +538,8 @@ void main() {
       expect(message, contains('张三'));
 
       // 两篇笔记 + index 不存在 + 无 vault，所以上传计数是 2
-      expect(message, contains('2 篇笔记'));
+      // 文案是「已用 张三 同步：上传 2，跳过 0」
+      expect(message, contains('上传 2'));
 
       // c.md 被删掉了（本地没有）
       final deletes = server.where('DELETE', '/items/');
@@ -578,7 +582,7 @@ void main() {
 
     test('subfolder 为空时落回默认值', () async {
       config.set('onedrive.subfolder', '   ');
-      expect(service.subfolder, 'MemoNest备份');
+      expect(service.subfolder, 'MemoNest');
       config.set('onedrive.subfolder', '/自定义/');
       expect(service.subfolder, '自定义');
     });

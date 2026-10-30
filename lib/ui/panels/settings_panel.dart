@@ -410,6 +410,17 @@ class _OneDriveTabState extends State<_OneDriveTab> {
 
   bool get _graphMode => state.oneDriveMode == 'graph';
 
+  String get _rootMode {
+    final mode = '${state.config.get('onedrive.root_mode', 'appfolder')}';
+    return mode == 'full' ? 'full' : 'appfolder';
+  }
+
+  void _setRootMode(String mode) {
+    state.config.set('onedrive.root_mode', mode);
+    state.config.save();
+    setState(() => _note = '');
+  }
+
   @override
   void initState() {
     super.initState();
@@ -501,9 +512,33 @@ class _OneDriveTabState extends State<_OneDriveTab> {
     return state.backup.mirrorToFolder() ?? 'OneDrive 未启用或未填写文件夹。';
   }
 
-  /// 设备代码登录：先拿码显示出来，用户来点「打开浏览器」，
-  /// 后台继续轮询；成功后顺手把账号名写进状态栏。
+  /// 只做增量同步，不额外生成 zip 快照——更像是双向同步而不是备份。
+  Future<String> _syncIncrementalNow() async {
+    _commitFolder();
+    _commitGraph();
+    final result = await service.syncIncremental(
+      mirrorNotes: state.config.get('onedrive.mirror_notes', true) == true,
+    );
+    return result.summary;
+  }
+
+  /// 一键登录：走授权码 + PKCE，直接开浏览器，授权完自动回调，
+  /// 用户不用抄设备码。回调起不来时再退回设备代码流程。
   Future<String> _login() async {
+    _commitGraph();
+    _cancelled = false;
+    final name = await service.loginPkce(
+      onUrl: (url) async {
+        final uri = Uri.tryParse(url);
+        if (uri != null) await launchUrlExt(uri);
+      },
+    );
+    if (mounted) setState(() => _device = null);
+    return '已登录：$name';
+  }
+
+  /// 设备代码兜底流程：有些环境回调端口被拦，就让用户手抄一次短码。
+  Future<String> _loginByDeviceCode() async {
     _commitGraph();
     _cancelled = false;
     final name = await service.loginDeviceFlow(
@@ -614,7 +649,9 @@ class _OneDriveTabState extends State<_OneDriveTab> {
 
         const SizedBox(height: 8),
         Text(
-          '子目录默认是「${state.config.get('onedrive.subfolder', 'MemoNest备份')}」。',
+          _graphMode
+              ? '云端目录：App 文件夹「Apps/MemoNest」或 OneDrive 根目录下的「${state.config.get('onedrive.subfolder', 'MemoNest')}」。'
+              : '子目录默认是「${state.config.get('onedrive.subfolder', 'MemoNest')}」。',
           style:
               const TextStyle(fontSize: 11, color: Palette.muted, height: 1.6),
         ),
@@ -645,6 +682,46 @@ class _OneDriveTabState extends State<_OneDriveTab> {
           ),
         ],
       ],
+    );
+  }
+
+  /// 同步范围的胶囊按钮，视觉与 [_modeChip] 一致。
+  Widget _rootChip(String mode, String label, String hint) {
+    final active = _rootMode == mode;
+    return Expanded(
+      child: GestureDetector(
+        onTap: () => _setRootMode(mode),
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 110),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          decoration: BoxDecoration(
+            color: active ? const Color(0xFFE7CF87) : Palette.strip,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: active ? const Color(0xFFC9A94A) : const Color(0xFFDCC888),
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 11.5,
+                  fontWeight: active ? FontWeight.w700 : FontWeight.w500,
+                  color: Palette.fg,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                hint,
+                style: const TextStyle(
+                    fontSize: 10, color: Palette.muted, height: 1.4),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -750,12 +827,36 @@ class _OneDriveTabState extends State<_OneDriveTab> {
       ),
       const SizedBox(height: 4),
       const Text(
-        '在 Azure 门户免费注册一个应用即可：\n'
-        '• 支持的帐户类型选「任何组织目录中的帐户(任何 Azure AD 目录 - 多租户)和个人 Microsoft 帐户」；\n'
-        '• 平台选「移动和桌面应用程序」，并开启「允许公共客户端流」；\n'
+        '在 Azure 门户免费注册一个应用即可（注册时的「平台」选「移动和桌面应用程序」，'
+        '并打开「允许公共客户端流」）：\n'
+        '• 支持的帐户类型选「任何组织目录中的帐户和个人 Microsoft 帐户」；\n'
+        '• 重定向 URI 不需要预填，登录时会在本机开一个回环端口自动接收授权结果；\n'
         '• 个人 OneDrive 账号就能用，租户保持 common 或改为 consumers。\n'
-        'ID 会保存在本地 config.json。',
+        'ID 只保存在本地 config.json。',
         style: TextStyle(fontSize: 11, color: Palette.muted, height: 1.6),
+      ),
+      const SizedBox(height: 12),
+
+      // ---------- 同步范围 ----------
+      const Text(
+        '同步范围',
+        style: TextStyle(
+            fontSize: 12.5, fontWeight: FontWeight.w600, color: Palette.fg),
+      ),
+      const SizedBox(height: 8),
+      Row(
+        children: [
+          _rootChip('appfolder', 'App 文件夹', '只占 Apps/MemoNest，权限最小'),
+          const SizedBox(width: 8),
+          _rootChip('full', '整个 OneDrive', '和 Remotely Save 一样放在根目录'),
+        ],
+      ),
+      const SizedBox(height: 4),
+      Text(
+        _rootMode == 'appfolder'
+            ? 'App 文件夹由微软分配（Apps/MemoNest），应用只能看到这一块。'
+            : '使用完整 OneDrive 权限，云盘根目录下的「${state.config.get('onedrive.subfolder', 'MemoNest')}」里可见。',
+        style: const TextStyle(fontSize: 11, color: Palette.muted, height: 1.6),
       ),
       const SizedBox(height: 10),
       const Text(
@@ -853,14 +954,31 @@ class _OneDriveTabState extends State<_OneDriveTab> {
                 children: [
                   _actionButton(
                     loggedIn ? '重新登录' : '登录 Microsoft 账号',
-                    () => _run('正在等待浏览器授权…', _login),
+                    () => _run('已打开浏览器，请完成授权…', _login),
                   ),
                   if (loggedIn) _actionButton('退出登录', _logout, danger: true),
                   if (loggedIn)
-                    _actionButton(
-                        '立即同步', () => _run('正在上传到 OneDrive…', _syncNow)),
+                    _actionButton('立即同步',
+                        () => _run('正在同步到 OneDrive…', _syncIncrementalNow)),
                 ],
               ),
+            const SizedBox(height: 6),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: TextButton(
+                onPressed:
+                    _busy ? null : () => _run('正在等待浏览器授权…', _loginByDeviceCode),
+                style: TextButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 4),
+                  minimumSize: const Size(0, 24),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+                child: const Text(
+                  '浏览器打不开？改用设备代码登录',
+                  style: TextStyle(fontSize: 11, color: Palette.link),
+                ),
+              ),
+            ),
           ],
         ),
       ),

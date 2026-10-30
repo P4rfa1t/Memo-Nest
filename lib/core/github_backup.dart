@@ -38,10 +38,14 @@ class GitHubService {
     final url = _remoteUrl();
     final plain = _plainRemote(url);
 
-    final workDir = Directory(paths.vaultMetaPath).existsSync()
+    // vaultMetaPath 是文件（data/vault/vault.json），不是目录。原来用
+    // Directory(...).existsSync() 判断，永远为 false，于是有私密库的用户
+    // 也只会推 data/notes，.mdenc 密文完全没进备份。
+    final hasVault = File(paths.vaultMetaPath).existsSync() ||
+        Directory(paths.vaultItemsDir).existsSync();
+    final workDir = hasVault
         ? _stageSource()
-        : Directory(paths.notesDir)
-      ..createSync(recursive: true);
+        : (Directory(paths.notesDir)..createSync(recursive: true));
 
     if (!Directory(p.join(workDir.path, '.git')).existsSync()) {
       _git(git, ['init', '-b', useBranch], workDir);
