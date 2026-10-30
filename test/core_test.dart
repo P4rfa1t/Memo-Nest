@@ -309,7 +309,7 @@ void main() {
       expect(detail, isNotNull);
       expect(detail!, contains('已同步'));
 
-      final sub = Directory(p.join(target.path, 'MemoNest备份'));
+      final sub = Directory(p.join(target.path, 'MemoNest'));
       final notes = Directory(p.join(sub.path, 'notes'));
       expect(notes.existsSync(), isTrue);
       expect(notes.listSync().whereType<File>().length, 1);
