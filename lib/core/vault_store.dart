@@ -138,6 +138,23 @@ class Vault {
     _key = null;
   }
 
+  /// 用已经解出来的密钥直接打开（Windows Hello 解锁走这条路）。
+  ///
+  /// 会用 `key_tag` 核对密钥确实属于这个库，对不上就抛 [VaultError]，
+  /// 免得把错误的密钥写进去、之后每次读写笔记都报解密失败。
+  void unlockWithKey(Uint8List key) {
+    if (key.length != crypto.keyBytes) {
+      throw VaultError('库密钥长度不正确');
+    }
+    final m = meta();
+    if (m.isEmpty) throw VaultError('找不到加密库');
+    final tag = m['key_tag'];
+    if (tag is String && tag.isNotEmpty && crypto.keyTag(key) != tag) {
+      throw VaultError('Hello 凭据与当前私密库不匹配，请用主密码解锁');
+    }
+    _key = Uint8List.fromList(key);
+  }
+
   /// 忘记主密码时彻底清空加密库（不可恢复）。
   void reset() {
     _key = null;

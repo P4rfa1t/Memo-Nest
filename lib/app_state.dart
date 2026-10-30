@@ -18,6 +18,7 @@ import '../core/note_store.dart';
 import '../core/onedrive.dart';
 import '../core/paths.dart';
 import '../core/store_api.dart';
+import '../core/hello.dart';
 import '../core/vault_store.dart';
 
 enum LibraryKind { notes, vault }
@@ -42,6 +43,9 @@ class AppState extends ChangeNotifier {
   VaultPanelMode vaultPanelMode = VaultPanelMode.none;
   String statusMessage = '';
 
+  /// 备份进行中：按钮据此显示「备份中…」并挡住重复点击。
+  bool backupRunning = false;
+
   /// 窗口是否最大化：自绘标题栏靠它决定中间那颗按钮画「方块」还是「还原」。
   bool maximized = false;
 
@@ -59,6 +63,9 @@ class AppState extends ChangeNotifier {
   }
 
   // ---------- 当前库 ----------
+  /// Windows Hello 解锁服务（DPAPI 托管库密钥 + 系统验证对话框）。
+  HelloUnlock get hello => HelloUnlock(paths, config);
+
   bool get isVault => library == LibraryKind.vault;
   NotesStore? get store {
     if (isVault) return vaultStore;
@@ -228,12 +235,46 @@ class AppState extends ChangeNotifier {
     current = s.allNotes().isEmpty
         ? s.create(title: '私密便签', content: '')
         : s.allNotes().first;
+    _rememberHelloKey();
     notifyListeners();
+  }
+
+  /// 库已解锁就把库密钥托给系统凭据保护，下次可以直接 Hello 解锁。
+  ///
+  /// 失败不影响主流程（比如 DPAPI 被策略禁用），只是下次还得输密码。
+  void _rememberHelloKey() {
+    final key = vault?.key;
+    if (key == null) return;
+    final service = hello;
+    if (!service.enabled) return;
+    try {
+      service.remember(key);
+    } on HelloError {
+      // 忽略：托管失败只影响便利性
+    } on FileSystemException {
+      // 同上
+    }
   }
 
   Future<void> unlockVault(String password) async {
     vault ??= Vault(paths.vaultDir);
     vault!.unlock(password);
+    vaultStore = VaultStore(vault!);
+    library = LibraryKind.vault;
+    vaultPanelOpen = false;
+    vaultPanelMode = VaultPanelMode.none;
+    final s = vaultStore!;
+    current = s.allNotes().isEmpty ? null : s.allNotes().first;
+    _rememberHelloKey();
+    notifyListeners();
+  }
+
+  /// 用 Windows Hello 验证并解锁。用户取消会抛 [HelloError]('已取消')。
+  Future<void> unlockVaultWithHello() async {
+    final service = hello;
+    final key = await service.retrieve();
+    vault ??= Vault(paths.vaultDir);
+    vault!.unlockWithKey(key);
     vaultStore = VaultStore(vault!);
     library = LibraryKind.vault;
     vaultPanelOpen = false;
@@ -265,6 +306,8 @@ class AppState extends ChangeNotifier {
   /// 忘记主密码时彻底清空加密库。不可恢复，UI 侧必须先确认。
   void resetVault() {
     saveCurrent(force: true);
+    // 库密钥要换新，旧托管记录必然对不上，直接删掉免得误报。
+    hello.forget();
     vault?.reset();
     vault = null;
     vaultStore = null;
@@ -388,8 +431,27 @@ class AppState extends ChangeNotifier {
   /// OneDrive 按模式分派：folder 模式直接复制；graph 模式登录后才上传，
   /// 未登录时给一句提示而不是抛错——用户可能只是忘了登录。
   Future<void> runBackup({String label = ''}) async {
+    if (backupRunning) return;
+    backupRunning = true;
+    statusMessage = '正在备份…';
+    notifyListeners();
     _dirtySinceBackup = false;
     final steps = <String>[];
+    try {
+      await _runBackupSteps(steps, label: label);
+    } finally {
+      backupRunning = false;
+    }
+    statusMessage = steps.isEmpty ? '没有可备份的内容' : steps.join('；');
+    notifyListeners();
+  }
+
+  /// 备份的实际步骤：本地快照 → OneDrive → GitHub。
+  ///
+  /// 抽出来是为了让 [runBackup] 用 try/finally 复位 `backupRunning`——
+  /// 任何一步抛出未捕获异常时都不会把备份按钮永久锁死。
+  Future<void> _runBackupSteps(List<String> steps,
+      {required String label}) async {
     File? snapshot;
     try {
       snapshot = backup.createSnapshot(label: label);
@@ -429,14 +491,11 @@ class AppState extends ChangeNotifier {
 
     if (config.get('github.enabled', false) == true) {
       try {
-        steps.add('GitHub ${github.push()}');
+        steps.add('GitHub ${await github.push()}');
       } on GitHubError catch (e) {
         steps.add('GitHub 失败：${e.message}');
       }
     }
-
-    statusMessage = steps.isEmpty ? '没有可备份的内容' : steps.join('；');
-    notifyListeners();
   }
 
   /// 上次备份之后有没有改动过（决定退出时要不要备份）。

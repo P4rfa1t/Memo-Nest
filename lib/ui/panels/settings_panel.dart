@@ -9,6 +9,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../../app_state.dart';
+import '../../core/hello.dart';
 import '../../core/backup.dart';
 import '../../core/onedrive.dart';
 import '../../platform/windows_shell.dart';
@@ -269,8 +270,31 @@ class _VaultTabState extends State<_VaultTab> {
   final _next = TextEditingController();
   final _repeat = TextEditingController();
   String _message = '';
+  /// Windows Hello 是否可用 / 已开启 / 有没有托管凭据。
+  bool _deviceOk = false;
+  bool _fingerprintPending = true;
 
   AppState get state => widget.state;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _probeHello());
+  }
+
+  Future<void> _probeHello() async {
+    var ok = false;
+    try {
+      ok = await state.hello.deviceAvailable();
+    } on HelloError {
+      ok = false;
+    }
+    if (!mounted) return;
+    setState(() {
+      _deviceOk = ok;
+      _fingerprintPending = false;
+    });
+  }
 
   @override
   void dispose() {
@@ -297,7 +321,30 @@ class _VaultTabState extends State<_VaultTab> {
           ),
         ),
         const SizedBox(height: 10),
+        _Row(
+          label: 'Windows Hello 解锁',
+          hint: _fingerprintPending
+              ? '正在检查…'
+              : (_deviceOk
+                  ? '用 PIN / 指纹 / 面容代替主密码。首次需要先用主密码解锁一次，'
+                      '密钥会交给系统凭据保护托管。'
+                  : '这台设备没有可用的 Windows Hello（需先在系统设置里录入 PIN）'),
+          trailing: Switch(
+            value: state.hello.enabled && _deviceOk,
+            onChanged: _deviceOk
+                ? (value) {
+                    state.hello.setEnabled(value);
+                    if (!value) {
+                      state.hello.forget();
+                    }
+                    setState(() => _message =
+                        value ? '已开启，下次先用主密码解锁一次' : '已关闭并删除托管凭据');
+                  }
+                : null,
+          ),
+        ),
         if (exists) ...[
+          const SizedBox(height: 10),
           const Text(
             '修改主密码',
             style: TextStyle(

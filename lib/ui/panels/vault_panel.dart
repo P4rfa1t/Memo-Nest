@@ -7,6 +7,7 @@ library;
 import 'package:flutter/material.dart';
 
 import '../../app_state.dart';
+import '../../core/hello.dart';
 import '../theme.dart';
 import '../widgets/panel_scaffold.dart';
 
@@ -29,6 +30,9 @@ class _VaultPanelState extends State<VaultPanel> {
   final _focus = <FocusNode>[FocusNode(), FocusNode(), FocusNode()];
   String _message = '';
   bool _busy = false;
+  /// 这台机器有没有可用的 Windows Hello，以及有没有已托管的凭据。
+  bool _helloDevice = false;
+  bool _helloReady = false;
 
   AppState get state => widget.state;
 
@@ -38,6 +42,7 @@ class _VaultPanelState extends State<VaultPanel> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _focus[0].requestFocus();
     });
+    _probeHello();
   }
 
   @override
@@ -49,6 +54,53 @@ class _VaultPanelState extends State<VaultPanel> {
       node.dispose();
     }
     super.dispose();
+  }
+
+  /// 探测 Windows Hello：有可用验证器、且本库已经托管过密钥。
+  Future<void> _probeHello() async {
+    final service = state.hello;
+    final ready = service.available;
+    var device = false;
+    if (ready) {
+      try {
+        device = await service.deviceAvailable();
+      } on HelloError {
+        device = false;
+      }
+    }
+    if (!mounted) return;
+    setState(() {
+      _helloDevice = device;
+      _helloReady = ready;
+    });
+  }
+
+  Future<void> _unlockWithHello() async {
+    setState(() {
+      _busy = true;
+      _message = '';
+    });
+    try {
+      await state.unlockVaultWithHello();
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _message = '';
+      });
+    } on HelloError catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        // 「已取消」是用户主动关掉对话框，不当错误红字显示。
+        _message = e.message == '已取消' ? '' : e.message;
+      });
+    } on Exception catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _busy = false;
+        _message = '$e';
+      });
+    }
   }
 
   @override
@@ -114,6 +166,33 @@ class _VaultPanelState extends State<VaultPanel> {
                 _secondaryButton('取消', widget.onClose),
               ],
             ),
+            if (mode == VaultPanelMode.unlock && _helloReady && _helloDevice) ...[
+              const SizedBox(height: 8),
+              GestureDetector(
+                onTap: _busy ? null : _unlockWithHello,
+                child: Container(
+                  height: 34,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: Palette.card,
+                    borderRadius: BorderRadius.circular(9),
+                    border: Border.all(color: const Color(0xFFDCC888)),
+                  ),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(Icons.fingerprint,
+                          size: 16, color: Palette.fg),
+                      const SizedBox(width: 6),
+                      Text(
+                        _busy ? '等待验证…' : '用 Windows Hello 解锁',
+                        style: const TextStyle(fontSize: 12.5, color: Palette.fg),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
             if (mode == VaultPanelMode.unlock) ...[
               const SizedBox(height: 6),
               Align(

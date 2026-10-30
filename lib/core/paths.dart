@@ -52,6 +52,8 @@ class AppPaths {
   String get vaultItemsDir => p.join(vaultDir, 'items');
   String get vaultTrashDir => p.join(vaultDir, 'trash');
   String get vaultMetaPath => p.join(vaultDir, 'vault.json');
+  /// Windows Hello 托管的库密钥（DPAPI 密文）。
+  String get helloPath => p.join(vaultDir, 'hello.bin');
   String get indexPath => p.join(dataDir, 'index.json');
   String get logPath => p.join(dataDir, 'memo.log');
 
@@ -95,6 +97,10 @@ Map<String, dynamic> defaultConfig() => {
         'keep_backups': 20,
         'window_geometry': '',
         'always_on_top': false,
+        'hello_unlock': true,
+      },
+      'vault': {
+        // 是否允许用 Windows Hello 解锁私密库（需要先用主密码解锁过一次）。
         'hello_unlock': true,
       },
     };

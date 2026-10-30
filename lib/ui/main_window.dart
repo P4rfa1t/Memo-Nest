@@ -414,7 +414,11 @@ class _MainWindowState extends State<MainWindow> {
             },
           ),
           const SizedBox(width: 4),
-          StripButton(label: '备份', onTap: () => state.runBackup()),
+          StripButton(
+            label: state.backupRunning ? '备份中…' : '备份',
+            // 备份过程中重复点击没意义，直接忽略（runBackup 里也有护栏）。
+            onTap: state.backupRunning ? () {} : () => state.runBackup(),
+          ),
           const SizedBox(width: 4),
           StripButton(
             label: '⋯',

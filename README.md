@@ -30,6 +30,25 @@ Graph 模式的同步逻辑与 Obsidian 的 Remotely Save 一致：本地记一�
 以及 `memo-backup-*.zip` 快照（按「云端保留备份数」清理旧的）。私密库密钥始终留在本机。
 超过 250 MB 的单个文件走 `createUploadSession` 分块上传。
 
+## 私密库的 Windows Hello 解锁
+
+主密码始终是唯一的根密钥，Hello 只是让日常解锁少打几次字：
+
+1. 第一次用主密码解锁（或创建）之后，库密钥会用 DPAPI（`CryptProtectData`）
+   加密存到 `data/vault/hello.bin`。DPAPI 的密钥绑定当前 Windows 账户，
+   拷走文件、换个账户、换台机器都解不开。
+2. 之后再打开「私密」，面板上多一个「用 Windows Hello 解锁」，验证通过
+   （`UserConsentVerifier`，PIN / 指纹 / 面容由系统弹窗）就把库密钥取回来。
+
+几条边界：
+
+- 改主密码不换库密钥，所以 Hello 记录继续有效，不用重新录。
+- 重置私密库会换新密钥，`hello.bin` 同时删掉。
+- 设置 → 私密库里可以关掉这个开关，关掉即删记录，回到纯主密码。
+- 没录入 PIN / 设备不支持时，开关是灰的，面板上也不显示 Hello 按钮。
+- `hello.bin` **不进** 备份包/GitHub/OneDrive 的同步内容——它是本机凭据，
+  传上去也没用（换个账户就解不开）。
+
 ## 与 Python 版的兼容点
 
 这些是逐字节对齐的，任何一边改动都要同步另一边：

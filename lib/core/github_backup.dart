@@ -27,8 +27,11 @@ class GitHubService {
   GitHubService(this.paths, this.config);
 
   /// 推送成功返回一行可读结果。
-  String push() {
-    final git = _which('git');
+  ///
+  /// 整个过程都是异步子进程：git push 是网络往返，同步跑会把 UI isolate
+  /// 卡死几秒，界面直接「无响应」。
+  Future<String> push() async {
+    final git = await _which('git');
     if (git == null) {
       throw GitHubError('未检测到 Git，请先安装 https://git-scm.com/download/win');
     }
@@ -48,9 +51,9 @@ class GitHubService {
         : (Directory(paths.notesDir)..createSync(recursive: true));
 
     if (!Directory(p.join(workDir.path, '.git')).existsSync()) {
-      _git(git, ['init', '-b', useBranch], workDir);
+      await _git(git, ['init', '-b', useBranch], workDir);
     }
-    _git(
+    await _git(
         git,
         [
           'config',
@@ -58,7 +61,7 @@ class GitHubService {
           '${config.get('github.author_name', 'MemoNest')}',
         ],
         workDir);
-    _git(
+    await _git(
         git,
         [
           'config',
@@ -67,36 +70,38 @@ class GitHubService {
         ],
         workDir);
 
-    final remotes =
-        _git(git, ['remote'], workDir).stdout.toString().split(RegExp(r'\s+'));
+    final remotes = (await _git(git, ['remote'], workDir))
+        .stdout
+        .toString()
+        .split(RegExp(r'\s+'));
     if (remotes.contains('origin')) {
-      _git(git, ['remote', 'set-url', 'origin', plain], workDir);
+      await _git(git, ['remote', 'set-url', 'origin', plain], workDir);
     } else {
-      _git(git, ['remote', 'add', 'origin', plain], workDir);
+      await _git(git, ['remote', 'add', 'origin', plain], workDir);
     }
 
-    _git(git, ['add', '-A'], workDir);
-    final staged =
-        _git(git, ['diff', '--cached', '--quiet'], workDir, check: false);
+    await _git(git, ['add', '-A'], workDir);
+    final staged = await _git(git, ['diff', '--cached', '--quiet'], workDir,
+        check: false);
     var committed = false;
     if (staged.exitCode != 0) {
       final now = DateTime.now();
       String two(int v) => v.toString().padLeft(2, '0');
       final stamp = '${now.year}-${two(now.month)}-${two(now.day)} '
           '${two(now.hour)}:${two(now.minute)}:${two(now.second)}';
-      _git(git, ['commit', '-m', '备忘录自动备份 $stamp'], workDir);
+      await _git(git, ['commit', '-m', '备忘录自动备份 $stamp'], workDir);
       committed = true;
     }
 
     var push =
-        _git(git, ['push', url, 'HEAD:$useBranch'], workDir, check: false);
+        await _git(git, ['push', url, 'HEAD:$useBranch'], workDir, check: false);
     if (push.exitCode != 0) {
       final output = '${push.stderr}\n${push.stdout}'.toLowerCase();
       if (output.contains('rejected') ||
           output.contains('fetch first') ||
           output.contains('non-fast-forward')) {
-        _git(git, ['fetch', url, useBranch], workDir, check: false);
-        _git(
+        await _git(git, ['fetch', url, useBranch], workDir, check: false);
+        await _git(
             git,
             [
               'merge',
@@ -109,7 +114,7 @@ class GitHubService {
             workDir,
             check: false);
         push =
-            _git(git, ['push', url, 'HEAD:$useBranch'], workDir, check: false);
+            await _git(git, ['push', url, 'HEAD:$useBranch'], workDir, check: false);
       }
       if (push.exitCode != 0) {
         final raw = '${push.stderr}'.trim().isEmpty
@@ -217,13 +222,13 @@ class GitHubService {
     return staging;
   }
 
-  ProcessResult _git(
+  Future<ProcessResult> _git(
     String git,
     List<String> args,
     Directory cwd, {
     bool check = true,
-  }) {
-    final result = Process.runSync(
+  }) async {
+    final result = await Process.run(
       git,
       ['-c', 'credential.helper=', ...args],
       workingDirectory: cwd.path,
@@ -247,8 +252,8 @@ class GitHubService {
     return result;
   }
 
-  static String? _which(String name) {
-    final result = Process.runSync('where', [name], runInShell: false);
+  static Future<String?> _which(String name) async {
+    final result = await Process.run('where', [name], runInShell: false);
     if (result.exitCode != 0) return null;
     final first = '${result.stdout}'
         .split('\n')
