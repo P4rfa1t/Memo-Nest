@@ -298,7 +298,13 @@ class _MainWindowState extends State<MainWindow> {
     state.saveCurrent(force: true);
     if (state.config.get('general.backup_on_exit', false) == true &&
         state.hasUnsavedBackup) {
-      state.runBackup(label: 'exit');
+      // 等它跑完再销毁：graph 模式要发网络请求，提前 dispose 会让
+      // 状态栏和 notifyListeners 撞上已释放的对象。
+      try {
+        await state.runBackup(label: 'exit');
+      } on Object catch (e) {
+        debugPrint('退出备份失败：$e');
+      }
     }
     state.disposeState();
     await windowManager.destroy();

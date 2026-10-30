@@ -1,13 +1,22 @@
-# MemoNest 备忘录 · Flutter 版
+# MemoNest 备忘录
 
-同一份便签应用的 Flutter 重写版，与仓库根目录的 Python/Tk 版**并行维护**，
-共用同一份磁盘数据格式——两版可以指向同一个 `data/` 目录，随时换版本不丢数据。
+桌面便签应用。Tk 版已经退役，本仓库只剩 Flutter 实现；磁盘数据格式沿用了
+Tk 版的布局，所以旧的 `data/` 目录可以直接拿来用，不用迁移。
 
-## 为什么单独一份
+## OneDrive 备份的两种模式
 
-Python 版用 Tk + 原生 RichEdit 接 TSF，中文输入走系统候选窗，体积小、启动快；
-Flutter 版换来更少的运行依赖、跨平台余地和更现代的排版能力，
-代价是要重写全部界面逻辑，并且失去 Tk 版那套原生 RichEdit 光标/菜单定制。
+设置 → OneDrive 里可以选同步方式：
+
+- **本地文件夹**：把备份复制进 OneDrive 同步文件夹（`%OneDrive%` 或手填路径），
+  由 OneDrive 客户端负责上传，不需要登录。
+- **账号登录**：走 Microsoft Graph，直接传到云端，不依赖本机 OneDrive 客户端。
+  用 OAuth2 设备代码流登录——填一个 Azure 应用（客户端）ID，点「登录」，
+  面板上出一个 8 位代码，在浏览器里输进去即可。令牌存本地 `config.json`，
+  过期自动用 `refresh_token` 续。
+
+Graph 模式上传的内容与文件夹模式一致：`notes/*.md` 明文镜像、`index.json`、
+`vault/items/*.mdenc` 密文与去掉 `dpapi_key` 的 `vault.json`，以及
+`memo-backup-*.zip` 快照（按「云端保留备份数」清理旧的）。私密库密钥始终留在本机。
 
 ## 与 Python 版的兼容点
 
@@ -36,7 +45,9 @@ flutter test
 ```
 
 `flutter test` 覆盖时间格式、Markdown 解析、明文库读写、加密库加解密与改密码、
-备份包布局与目录同步。
+备份包布局与目录同步，以及 Graph 客户端（设备代码登录、令牌续期、目录上传、
+同步与清理）。Graph 的测试不看网络：用本地 `HttpServer` 模拟微软的端点，
+走真实的 HTTP 路径，所以编码、状态码、错误分支都是真在跑。
 
 ## 构建（Windows）
 
@@ -45,7 +56,7 @@ Dart 内核编译拿到乱码路径，`mklink /J` 也绕不过去）。可行做
 目录再构建：
 
 ```powershell
-$src = 'C:\Users\<you>\Documents\备忘录\flutter'
+$src = 'C:\Users\<you>\Documents\备忘录'
 robocopy $src C:\mnbuild /E /XD "$src\build" "$src\.dart_tool" C:\mnbuild\build C:\mnbuild\.dart_tool
 Set-Location C:\mnbuild
 flutter build windows --release
@@ -68,6 +79,7 @@ lib/
   core/                  纯 Dart：模型、路径、配置、加密、Markdown、两个库、备份
   platform/              FFI：剪贴板图片、注册表自启、桌面快捷方式
   ui/                    主题、主窗口、编辑区、Markdown 预览、各面板
-test/core_test.dart      18 项单元测试
+test/core_test.dart      18 项单元测试（模型、库、加密、备份）
+test/onedrive_test.dart  20 项 Graph 客户端测试，打本地假服务器
 tool/                    xcompat / backup_demo 这类一次性验证脚本
 ```

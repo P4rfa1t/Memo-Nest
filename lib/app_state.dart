@@ -15,6 +15,7 @@ import '../core/backup.dart';
 import '../core/github_backup.dart';
 import '../core/models.dart';
 import '../core/note_store.dart';
+import '../core/onedrive.dart';
 import '../core/paths.dart';
 import '../core/store_api.dart';
 import '../core/vault_store.dart';
@@ -364,15 +365,34 @@ class AppState extends ChangeNotifier {
   // ---------- 备份 ----------
   BackupService get backup => BackupService(paths, config);
   GitHubService get github => GitHubService(paths, config);
+  OneDriveService get oneDrive => OneDriveService(paths, config);
+
+  /// OneDrive 当前的同步模式：`folder`（复制到本地 OneDrive 目录）或
+  /// `graph`（登录 Microsoft 账号直接上传）。默认 folder。
+  String get oneDriveMode {
+    final raw = '${config.get('onedrive.mode', 'folder') ?? 'folder'}'.trim();
+    return raw == 'graph' ? 'graph' : 'folder';
+  }
+
+  void setOneDriveMode(String mode) {
+    config.set('onedrive.mode', mode == 'graph' ? 'graph' : 'folder');
+    config.save();
+    notifyListeners();
+  }
 
   /// 依次跑本地打包 → OneDrive → GitHub，把每一步的结果写进状态栏。
   ///
   /// 与 Python 版 `run_backup` 一样：一步失败不影响后面的步骤，
   /// 失败原因逐条汇报，而不是整批放弃。
-  void runBackup({String label = ''}) {
+  ///
+  /// OneDrive 按模式分派：folder 模式直接复制；graph 模式登录后才上传，
+  /// 未登录时给一句提示而不是抛错——用户可能只是忘了登录。
+  Future<void> runBackup({String label = ''}) async {
+    _dirtySinceBackup = false;
     final steps = <String>[];
+    File? snapshot;
     try {
-      final snapshot = backup.createSnapshot(label: label);
+      snapshot = backup.createSnapshot(label: label);
       steps.add('本地 ${p.basename(snapshot.path)}');
       backup.prune();
     } on BackupError catch (e) {
@@ -382,11 +402,28 @@ class AppState extends ChangeNotifier {
     }
 
     if (config.get('onedrive.enabled', false) == true) {
-      try {
-        final detail = backup.mirrorToFolder();
-        if (detail != null) steps.add('OneDrive $detail');
-      } on BackupError catch (e) {
-        steps.add('OneDrive 失败：${e.message}');
+      if (oneDriveMode == 'graph') {
+        final service = oneDrive;
+        if (service.clientId.isEmpty) {
+          steps.add('OneDrive 失败：请先填写 Azure 应用 ID');
+        } else if (!service.isLoggedIn) {
+          steps.add('OneDrive 失败：尚未登录 Microsoft 账号');
+        } else {
+          try {
+            steps.add('OneDrive ${await service.sync(snapshot: snapshot)}');
+          } on GraphError catch (e) {
+            steps.add('OneDrive 失败：${e.message}');
+          } on FileSystemException catch (e) {
+            steps.add('OneDrive 失败：${e.message}');
+          }
+        }
+      } else {
+        try {
+          final detail = backup.mirrorToFolder();
+          if (detail != null) steps.add('OneDrive $detail');
+        } on BackupError catch (e) {
+          steps.add('OneDrive 失败：${e.message}');
+        }
       }
     }
 
@@ -398,7 +435,6 @@ class AppState extends ChangeNotifier {
       }
     }
 
-    _dirtySinceBackup = false;
     statusMessage = steps.isEmpty ? '没有可备份的内容' : steps.join('；');
     notifyListeners();
   }
@@ -413,7 +449,10 @@ class AppState extends ChangeNotifier {
     if (minutes <= 0) return;
     _backupTimer = Timer.periodic(
       Duration(minutes: minutes),
-      (_) => runBackup(label: 'auto'),
+      (_) => runBackup(label: 'auto').catchError((Object e) {
+        statusMessage = '自动备份失败：$e';
+        notifyListeners();
+      }),
     );
   }
 

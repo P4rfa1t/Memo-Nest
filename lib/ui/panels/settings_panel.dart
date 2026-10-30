@@ -5,13 +5,25 @@
 library;
 
 import 'package:flutter/material.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../../app_state.dart';
 import '../../core/backup.dart';
+import '../../core/onedrive.dart';
 import '../../platform/windows_shell.dart';
 import '../theme.dart';
 import '../widgets/panel_scaffold.dart';
+
+/// 打开外部链接。url_launcher 在 Windows 上偶尔抛 PlatformException
+/// （没有默认浏览器、被组策略拦下），这里统一收成 false，交给调用方提示。
+Future<bool> launchUrlExt(Uri uri) async {
+  try {
+    return await launchUrl(uri, mode: LaunchMode.externalApplication);
+  } on Object {
+    return false;
+  }
+}
 
 class SettingsPanel extends StatefulWidget {
   final AppState state;
@@ -382,9 +394,21 @@ class _OneDriveTab extends StatefulWidget {
 
 class _OneDriveTabState extends State<_OneDriveTab> {
   late final TextEditingController _folder;
+  late final TextEditingController _clientId;
+  late final TextEditingController _tenant;
+
   String _note = '';
+  bool _busy = false;
+  String _busyLabel = '';
+  bool _cancelled = false;
+
+  /// 当前展示给用户的设备代码。
+  DeviceCodeInfo? _device;
 
   AppState get state => widget.state;
+  OneDriveService get service => state.oneDrive;
+
+  bool get _graphMode => state.oneDriveMode == 'graph';
 
   @override
   void initState() {
@@ -392,11 +416,19 @@ class _OneDriveTabState extends State<_OneDriveTab> {
     _folder = TextEditingController(
       text: '${state.config.get('onedrive.folder', '')}',
     );
+    _clientId = TextEditingController(
+      text: '${state.config.get('onedrive.client_id', '')}',
+    );
+    final tenant = '${state.config.get('onedrive.tenant', 'common')}';
+    _tenant = TextEditingController(text: tenant.isEmpty ? 'common' : tenant);
   }
 
   @override
   void dispose() {
+    _cancelled = true;
     _folder.dispose();
+    _clientId.dispose();
+    _tenant.dispose();
     super.dispose();
   }
 
@@ -404,6 +436,13 @@ class _OneDriveTabState extends State<_OneDriveTab> {
     state.config.set('onedrive.folder', _folder.text.trim());
     state.config.save();
     setState(() => _note = '');
+  }
+
+  void _commitGraph() {
+    state.config.set('onedrive.client_id', _clientId.text.trim());
+    final tenant = _tenant.text.trim();
+    state.config.set('onedrive.tenant', tenant.isEmpty ? 'common' : tenant);
+    state.config.save();
   }
 
   void _detect() {
@@ -417,26 +456,108 @@ class _OneDriveTabState extends State<_OneDriveTab> {
     setState(() => _note = '已填入：${dir.path}');
   }
 
-  void _syncNow() {
-    _commitFolder();
+  /// 把状态切到「忙」，标题写进 [_busyLabel]，跑 [task]。
+  ///
+  /// 所有 Graph 操作都要 await，直接 setState 到忙态再 await 才不会让界面
+  /// 看起来卡死——设备代码登录最多要等 15 分钟。
+  Future<void> _run(String label, Future<String> Function() task) async {
+    if (_busy) return;
+    setState(() {
+      _busy = true;
+      _busyLabel = label;
+      _note = '';
+    });
+    String message;
     try {
-      final detail = state.backup.mirrorToFolder();
-      setState(() => _note = detail ?? 'OneDrive 未启用或未填写文件夹。');
+      message = await task();
+    } on GraphError catch (e) {
+      message = e.message;
     } on BackupError catch (e) {
-      setState(() => _note = e.message);
+      message = e.message;
+    } on Object catch (e) {
+      message = '出错了：$e';
     }
+    if (!mounted) return;
+    setState(() {
+      _busy = false;
+      _busyLabel = '';
+      _note = message;
+    });
+  }
+
+  Future<String> _syncNow() async {
+    _commitFolder();
+    _commitGraph();
+    if (_graphMode) {
+      final snapshot = state.backup.createSnapshot(label: 'onedrive');
+      return service.sync(snapshot: snapshot);
+    }
+    return state.backup.mirrorToFolder() ?? 'OneDrive 未启用或未填写文件夹。';
+  }
+
+  /// 设备代码登录：先拿码显示出来，用户来点「打开浏览器」，
+  /// 后台继续轮询；成功后顺手把账号名写进状态栏。
+  Future<String> _login() async {
+    _commitGraph();
+    _cancelled = false;
+    final name = await service.loginDeviceFlow(
+      onCode: (info) {
+        if (!mounted) return;
+        setState(() => _device = info);
+      },
+      shouldStop: () => _cancelled || !mounted,
+    );
+    if (mounted) setState(() => _device = null);
+    return '已登录：$name';
+  }
+
+  void _cancelLogin() {
+    _cancelled = true;
+    setState(() {
+      _busy = false;
+      _busyLabel = '';
+      _device = null;
+      _note = '已取消登录';
+    });
+  }
+
+  Future<void> _openBrowser() async {
+    final info = _device;
+    if (info == null) return;
+    final uri = Uri.tryParse(info.verificationUri);
+    if (uri == null) {
+      setState(() => _note = '微软返回的验证地址无效');
+      return;
+    }
+    final ok = await launchUrlExt(uri);
+    if (!mounted) return;
+    setState(() => _note = ok
+        ? '已在浏览器打开，输入代码 ${info.userCode} 完成授权。'
+        : '打开浏览器失败，请手动访问 ${info.verificationUri}');
+  }
+
+  Future<void> _logout() async {
+    service.logout();
+    setState(() {
+      _device = null;
+      _note = '已退出 Microsoft 账号';
+    });
   }
 
   @override
   Widget build(BuildContext context) {
     final enabled = state.config.get('onedrive.enabled', false) == true;
     final mirror = state.config.get('onedrive.mirror_notes', true) == true;
+    final loggedIn = service.isLoggedIn;
+    final accountName = service.account;
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
       children: [
         _Row(
           label: '启用 OneDrive 备份',
-          hint: '把备份复制到 OneDrive 同步文件夹，不需要登录。',
+          hint: _graphMode
+              ? '登录 Microsoft 账号后直接上传到云端，不经过本地 OneDrive 客户端。'
+              : '把备份复制到 OneDrive 同步文件夹，不需要登录。',
           trailing: Switch(
             value: enabled,
             activeThumbColor: Palette.card,
@@ -464,36 +585,51 @@ class _OneDriveTabState extends State<_OneDriveTab> {
         ),
         _numberRow(state, '云端保留备份数', 'onedrive.keep_backups',
             hint: '子目录里保留的 memo-backup-*.zip 数量。'),
-        const SizedBox(height: 10),
+        const SizedBox(height: 12),
+
+        // ---------- 模式切换 ----------
         const Text(
-          'OneDrive 文件夹',
+          '同步方式',
           style: TextStyle(
               fontSize: 12.5, fontWeight: FontWeight.w600, color: Palette.fg),
         ),
-        const SizedBox(height: 6),
-        TextField(
-          controller: _folder,
-          style: const TextStyle(fontSize: 12.5, color: Palette.fg),
-          decoration:
-              const InputDecoration(hintText: r'例如 C:\Users\你\OneDrive'),
-          onSubmitted: (_) => _commitFolder(),
-          onTapOutside: (_) => _commitFolder(),
-        ),
         const SizedBox(height: 8),
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
+        Row(
           children: [
-            _actionButton('自动检测', _detect),
-            _actionButton('立即同步', _syncNow),
+            _modeChip('folder', '本地文件夹', '复制到 OneDrive 同步目录'),
+            const SizedBox(width: 8),
+            _modeChip('graph', '账号登录', '直接上传到云端'),
           ],
         ),
+        const SizedBox(height: 14),
+
+        if (_graphMode) ..._graphSections(loggedIn, accountName),
+        if (!_graphMode) ..._folderSections(),
+
         const SizedBox(height: 8),
         Text(
-          '留空则不复制。子目录默认是「${state.config.get('onedrive.subfolder', 'MemoNest备份')}」。',
+          '子目录默认是「${state.config.get('onedrive.subfolder', 'MemoNest备份')}」。',
           style:
               const TextStyle(fontSize: 11, color: Palette.muted, height: 1.6),
         ),
+        if (_busy) ...[
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              const SizedBox(
+                width: 12,
+                height: 12,
+                child: CircularProgressIndicator(
+                    strokeWidth: 1.6, color: Palette.muted),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                _busyLabel,
+                style: const TextStyle(fontSize: 11, color: Palette.muted),
+              ),
+            ],
+          ),
+        ],
         if (_note.isNotEmpty) ...[
           const SizedBox(height: 8),
           Text(
@@ -504,6 +640,209 @@ class _OneDriveTabState extends State<_OneDriveTab> {
         ],
       ],
     );
+  }
+
+  Widget _modeChip(String mode, String label, String hint) {
+    final active = state.oneDriveMode == mode;
+    return Expanded(
+      child: GestureDetector(
+        onTap: () {
+          state.setOneDriveMode(mode);
+          setState(() => _note = '');
+        },
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 110),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          decoration: BoxDecoration(
+            color: active ? const Color(0xFFE7CF87) : Palette.strip,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: active ? const Color(0xFFC9A94A) : const Color(0xFFDCC888),
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 11.5,
+                  fontWeight: active ? FontWeight.w700 : FontWeight.w500,
+                  color: Palette.fg,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                hint,
+                style: const TextStyle(
+                    fontSize: 10, color: Palette.muted, height: 1.4),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  List<Widget> _folderSections() {
+    return [
+      const Text(
+        'OneDrive 文件夹',
+        style: TextStyle(
+            fontSize: 12.5, fontWeight: FontWeight.w600, color: Palette.fg),
+      ),
+      const SizedBox(height: 6),
+      TextField(
+        controller: _folder,
+        style: const TextStyle(fontSize: 12.5, color: Palette.fg),
+        decoration: const InputDecoration(hintText: r'例如 C:\Users\你\OneDrive'),
+        onSubmitted: (_) => _commitFolder(),
+        onTapOutside: (_) => _commitFolder(),
+      ),
+      const SizedBox(height: 8),
+      Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        children: [
+          _actionButton('自动检测', _detect),
+          _actionButton('立即同步', () => _run('正在复制到文件夹…', _syncNow)),
+        ],
+      ),
+      const SizedBox(height: 8),
+      const Text(
+        '留空则自动探测 OneDrive 目录；探测不到时需要手动填写。',
+        style: TextStyle(fontSize: 11, color: Palette.muted, height: 1.6),
+      ),
+    ];
+  }
+
+  List<Widget> _graphSections(bool loggedIn, String accountName) {
+    final device = _device;
+    return [
+      const Text(
+        'Azure 应用 ID',
+        style: TextStyle(
+            fontSize: 12.5, fontWeight: FontWeight.w600, color: Palette.fg),
+      ),
+      const SizedBox(height: 6),
+      TextField(
+        controller: _clientId,
+        style: const TextStyle(fontSize: 12.5, color: Palette.fg),
+        decoration: const InputDecoration(
+          hintText: '应用程序(客户端) ID，形如 00000000-0000-…',
+        ),
+        onSubmitted: (_) => _commitGraph(),
+        onTapOutside: (_) => _commitGraph(),
+      ),
+      const SizedBox(height: 4),
+      const Text(
+        '在 Azure 门户免费注册一个应用即可，类型选「移动和桌面应用程序」，'
+        '并开启「允许公共客户端流」。ID 会保存在本地 config.json。',
+        style: TextStyle(fontSize: 11, color: Palette.muted, height: 1.6),
+      ),
+      const SizedBox(height: 10),
+      const Text(
+        '租户',
+        style: TextStyle(
+            fontSize: 12.5, fontWeight: FontWeight.w600, color: Palette.fg),
+      ),
+      const SizedBox(height: 6),
+      TextField(
+        controller: _tenant,
+        style: const TextStyle(fontSize: 12.5, color: Palette.fg),
+        decoration: const InputDecoration(hintText: 'common'),
+        onSubmitted: (_) => _commitGraph(),
+        onTapOutside: (_) => _commitGraph(),
+      ),
+      const SizedBox(height: 4),
+      const Text(
+        '个人账号保持 common；组织账号可填租户 ID 或域名。',
+        style: TextStyle(fontSize: 11, color: Palette.muted, height: 1.6),
+      ),
+      const SizedBox(height: 14),
+
+      // ---------- 登录状态 ----------
+      Container(
+        padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
+        decoration: BoxDecoration(
+          color: Palette.field,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: Palette.border),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  loggedIn ? Icons.check_circle_outline : Icons.person_outline,
+                  size: 15,
+                  color: loggedIn ? const Color(0xFF7A8C3F) : Palette.muted,
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    loggedIn
+                        ? '已登录${accountName.isEmpty ? '' : '：$accountName'}'
+                        : '未登录 Microsoft 账号',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                      color: loggedIn ? Palette.fg : Palette.muted,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            if (device != null) ...[
+              const Text(
+                '在浏览器里输入下面的代码完成授权：',
+                style: TextStyle(fontSize: 11, color: Palette.muted),
+              ),
+              const SizedBox(height: 6),
+              SelectableText(
+                device.userCode,
+                style: const TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 3,
+                  color: Palette.fg,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  _actionButton('打开浏览器', _openBrowser),
+                  _actionButton('取消', _cancelLogin, danger: true),
+                ],
+              ),
+            ] else if (_busy) ...[
+              Text(
+                _busyLabel,
+                style: const TextStyle(fontSize: 11, color: Palette.muted),
+              ),
+            ] else
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  _actionButton(
+                    loggedIn ? '重新登录' : '登录 Microsoft 账号',
+                    () => _run('正在等待浏览器授权…', _login),
+                  ),
+                  if (loggedIn) _actionButton('退出登录', _logout, danger: true),
+                  if (loggedIn)
+                    _actionButton(
+                        '立即同步', () => _run('正在上传到 OneDrive…', _syncNow)),
+                ],
+              ),
+          ],
+        ),
+      ),
+    ];
   }
 }
 
