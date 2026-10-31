@@ -43,6 +43,8 @@ class PlainHost implements Host {
   bool get deviceAuthSupported => false;
   @override
   bool get secretSupported => false;
+  @override
+  bool get secretPromptBuiltIn => false;
 
   @override
   Future<void> initWindow() async {}
@@ -457,6 +459,11 @@ class AndroidHost extends PlainHost {
   @override
   bool get secretSupported => true;
 
+  /// Keystore 密钥绑定了生物识别，加解密时系统自己会弹验证框，
+  /// 所以 Dart 侧不再单独调一次 authenticate。
+  @override
+  bool get secretPromptBuiltIn => true;
+
   @override
   String get authLabel => '指纹 / 面容解锁';
 
@@ -478,6 +485,8 @@ class AndroidHost extends PlainHost {
       'data': base64Encode(plain),
       'description': description,
     });
+    // 原生侧在用户取消时回 null：这是「没托管成功」，不是故障。
+    if (result == null) throw const HostError('已取消');
     if (result is! String) throw const HostError('托管凭据失败：原生侧没有返回数据');
     return base64Decode(result);
   }
@@ -487,6 +496,7 @@ class AndroidHost extends PlainHost {
     final result = await _helloChannel('unprotect', {
       'data': base64Encode(blob),
     });
+    if (result == null) throw const HostError('已取消');
     if (result is! String) throw const HostError('读取凭据失败：原生侧没有返回数据');
     return base64Decode(result);
   }

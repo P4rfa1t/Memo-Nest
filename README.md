@@ -178,7 +178,14 @@ flutter build apk --release
 密钥加密库密钥，明文不出 TEE。
 
 Android 上没有「数据目录」可打开，「⋯ → 打开数据文件夹」会退化成把路径
-显示在状态栏里让你复制。
+显示在右下角浮层里让你复制。
+
+## 状态提示
+
+备份、导入导出、粘贴图片这类一次性消息走右下角的深色浮层，不再挤在底栏
+那行 11px 的小字里——底栏只留字数与行数。浮层按结果上色（成功绿、失败红），
+几秒后自己消失，点一下立刻关掉；最多同时三条，重复的消息不会叠在一起。
+三个平台共用同一套实现，Android 上会避让底部手势条。
 
 ## 目录
 
@@ -188,11 +195,12 @@ lib/
   app_state.dart         两个库、当前便签、搜索、自动保存、备份调度
   core/                  纯 Dart：模型、路径、配置、加密、Markdown、两个库、备份
   platform/              平台差异：宿主接口、Windows FFI、Linux XDG、Android 通道、PNG 编码
-  ui/                    主题、主窗口、编辑区、Markdown 预览、各面板
+  ui/                    主题、主窗口、编辑区、Markdown 预览、各面板、浮层
 test/core_test.dart      18 项单元测试（模型、库、加密、备份）
 test/onedrive_test.dart  20 项 Graph 客户端测试，打本地假服务器
 test/import_md_test.dart 5 项导入 Markdown
 test/vault_lock_test.dart / vault_panel_hello_test.dart
                          7 项私密库上锁与系统凭据按钮
+test/toast_test.dart     8 项浮层与系统凭据分支
 tool/                    xcompat / backup_demo 这类一次性验证脚本
 ```

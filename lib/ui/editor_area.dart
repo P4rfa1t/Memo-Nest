@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../app_state.dart';
+import '../core/toast.dart';
 import '../core/models.dart';
 import '../core/note_store.dart';
 import '../platform/png.dart';
@@ -303,14 +304,12 @@ class _EditorAreaState extends State<EditorArea> {
   void _pasteImage() {
     final note = state.current;
     if (note == null) {
-      state.statusMessage = '先选一张便签';
-      state.refresh();
+      state.showToast('先选一张便签', kind: ToastKind.error);
       return;
     }
     final bitmap = state.host.readClipboardBitmap();
     if (bitmap == null) {
-      state.statusMessage = '剪贴板里没有可粘贴的图片';
-      state.refresh();
+      state.showToast('剪贴板里没有可粘贴的图片', kind: ToastKind.error);
       return;
     }
     try {
@@ -322,18 +321,18 @@ class _EditorAreaState extends State<EditorArea> {
       );
       final store = state.store;
       if (store is! NoteStore) {
-        state.statusMessage = '私密库暂不支持粘贴图片';
-        state.refresh();
+        state.showToast('私密库暂不支持粘贴图片', kind: ToastKind.error);
         return;
       }
       final rel = store.saveAsset(png, note.title);
       final alt = note.title.isEmpty ? '图片' : note.title;
       _insertAtCursor('\n![$alt]($rel)\n');
-      state.statusMessage = '已粘贴图片 ${bitmap.width}×${bitmap.height}';
-      state.refresh();
+      state.showToast(
+        '已粘贴图片 ${bitmap.width}×${bitmap.height}',
+        kind: ToastKind.success,
+      );
     } on Exception catch (e) {
-      state.statusMessage = '粘贴图片失败：$e';
-      state.refresh();
+      state.showToast('粘贴图片失败：$e', kind: ToastKind.error);
     }
   }
 

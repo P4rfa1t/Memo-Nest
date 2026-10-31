@@ -67,6 +67,9 @@ class HelloUnlock {
   }
 
   /// 弹系统验证对话框。用户取消或验证失败都返回 false。
+  ///
+  /// [retrieve] 在 `host.secretPromptBuiltIn` 的平台（Android）上不会调它：
+  /// 那里的验证是解密本身的一部分，再单独弹一次会连出两个对话框。
   Future<bool> verify({String prompt = '解锁私密笔记库'}) async {
     try {
       return await host.deviceAuthVerify(prompt: prompt);
@@ -107,8 +110,12 @@ class HelloUnlock {
     if (!file.existsSync()) {
       throw HelloError('还没有可用的系统凭据，请先用主密码解锁一次');
     }
-    final ok = await verify(prompt: prompt);
-    if (!ok) throw HelloError('已取消');
+    // Android 的 Keystore 密钥绑定生物识别，unprotectSecret 自己会弹验证框；
+    // 这里再 verify 一次就会连弹两个。
+    if (!host.secretPromptBuiltIn) {
+      final ok = await verify(prompt: prompt);
+      if (!ok) throw HelloError('已取消');
+    }
 
     Uint8List plain;
     try {

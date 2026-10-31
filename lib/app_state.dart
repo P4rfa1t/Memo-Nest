@@ -17,8 +17,9 @@ import '../core/models.dart';
 import '../core/note_store.dart';
 import '../core/onedrive.dart';
 import '../core/paths.dart';
-import '../core/store_api.dart';
 import '../core/hello.dart';
+import '../core/store_api.dart';
+import '../core/toast.dart';
 import '../core/vault_store.dart';
 import '../platform/host.dart';
 import '../platform/host_io.dart';
@@ -43,7 +44,16 @@ class AppState extends ChangeNotifier {
   bool previewMode = false;
   bool vaultPanelOpen = false;
   VaultPanelMode vaultPanelMode = VaultPanelMode.none;
-  String statusMessage = '';
+
+  /// 右下角浮层里正在显示的消息，最新的在最后。
+  final List<ToastMessage> toasts = <ToastMessage>[];
+  int _toastSeq = 0;
+  final Map<int, Timer> _toastTimers = <int, Timer>{};
+
+  /// 底栏那行只放字数统计和更新时间；一次性结果走 [showToast]。
+  ///
+  /// 之前备份结果、导入结果都挤在底栏，11px 又和统计并列，
+  /// 拼起来三四段话根本看不清，所以改成浮层。
 
   /// 备份进行中：按钮据此显示「备份中…」并挡住重复点击。
   bool backupRunning = false;
@@ -148,9 +158,8 @@ class AppState extends ChangeNotifier {
     try {
       s.save(note);
       _dirty = false;
-      statusMessage = '已保存';
     } on Exception catch (e) {
-      statusMessage = '保存失败：$e';
+      showToast('保存失败：$e', kind: ToastKind.error);
     }
     notifyListeners();
   }
@@ -260,7 +269,9 @@ class AppState extends ChangeNotifier {
   /// 库已解锁就把库密钥托给系统凭据保护，下次可以直接用系统验证解锁。
   ///
   /// 失败不影响主流程（比如 DPAPI 被策略禁用、Android Keystore 不可用），
-  /// 只是下次还得输密码。
+  /// 只是下次还得输密码——但失败必须**说出来**：之前这里把所有异常静默
+  /// 吞掉，Android 上 Keystore 一直失败也看不出来，用户只会遇到
+  /// 「明明解锁过了还说没有可用凭据」。
   Future<void> _rememberHelloKey() async {
     final key = vault?.key;
     if (key == null) return;
@@ -268,12 +279,17 @@ class AppState extends ChangeNotifier {
     if (!service.supported || !service.enabled) return;
     try {
       await service.remember(key);
-    } on HelloError {
-      // 忽略：托管失败只影响便利性
-    } on HostError {
-      // 同上
-    } on FileSystemException {
-      // 同上
+    } on HelloError catch (e) {
+      // 「已取消」是用户主动关掉验证框，不当错误。
+      if (e.message != '已取消') {
+        showToast('系统凭据托管失败：${e.message}', kind: ToastKind.error);
+      }
+    } on HostError catch (e) {
+      if (e.message != '已取消') {
+        showToast('系统凭据托管失败：${e.message}', kind: ToastKind.error);
+      }
+    } on FileSystemException catch (e) {
+      showToast('系统凭据托管失败：${e.message}', kind: ToastKind.error);
     }
   }
 
@@ -339,7 +355,7 @@ class AppState extends ChangeNotifier {
     }
     vaultPanelOpen = false;
     vaultPanelMode = VaultPanelMode.none;
-    statusMessage = '私密库已清空';
+    showToast('私密库已清空', kind: ToastKind.success);
     notifyListeners();
   }
 
@@ -352,7 +368,7 @@ class AppState extends ChangeNotifier {
     if (note == null) return;
     if (isVault) {
       if (vaultStore == null) {
-        statusMessage = '私密库已锁定';
+        showToast('私密库已锁定，先解锁再操作', kind: ToastKind.error);
         notifyListeners();
         return;
       }
@@ -368,14 +384,14 @@ class AppState extends ChangeNotifier {
       plainStore.save(moved);
       vaultStore!.delete(note.id);
       current = moved;
-      statusMessage = '已移回普通便签';
+      showToast('已移回普通便签', kind: ToastKind.success);
     } else {
       if (vaultStore == null) {
         vaultPanelOpen = true;
         vaultPanelMode = vault != null && vault!.exists()
             ? VaultPanelMode.unlock
             : VaultPanelMode.create;
-        statusMessage = '先解锁私密库';
+        showToast('先解锁私密库');
         notifyListeners();
         return;
       }
@@ -391,7 +407,7 @@ class AppState extends ChangeNotifier {
       vaultStore!.save(moved);
       plainStore.delete(note.id);
       current = moved;
-      statusMessage = '已移到私密笔记库';
+      showToast('已移到私密笔记库', kind: ToastKind.success);
     }
     notifyListeners();
   }
@@ -454,7 +470,6 @@ class AppState extends ChangeNotifier {
   Future<void> runBackup({String label = ''}) async {
     if (backupRunning) return;
     backupRunning = true;
-    statusMessage = '正在备份…';
     notifyListeners();
     _dirtySinceBackup = false;
     final steps = <String>[];
@@ -463,7 +478,13 @@ class AppState extends ChangeNotifier {
     } finally {
       backupRunning = false;
     }
-    statusMessage = steps.isEmpty ? '没有可备份的内容' : steps.join('；');
+    final failed = steps.any((step) => step.contains('失败'));
+    showToast(
+      steps.isEmpty ? '没有可备份的内容' : steps.join('\n'),
+      kind: failed ? ToastKind.error : ToastKind.success,
+      // 失败信息可能有好几行，留久一点让人看完。
+      duration: Duration(seconds: failed ? 9 : 5),
+    );
     notifyListeners();
   }
 
@@ -530,7 +551,7 @@ class AppState extends ChangeNotifier {
     _backupTimer = Timer.periodic(
       Duration(minutes: minutes),
       (_) => runBackup(label: 'auto').catchError((Object e) {
-        statusMessage = '自动备份失败：$e';
+        showToast('自动备份失败：$e', kind: ToastKind.error);
         notifyListeners();
       }),
     );
@@ -541,6 +562,39 @@ class AppState extends ChangeNotifier {
     config.save();
     _startBackupTimer();
     notifyListeners();
+  }
+
+  /// 右下角弹一条提示。同一条文字连着来只留一条，最多同时显示 3 条。
+  ///
+  /// [duration] 到了自动消失；点一下也能立刻关掉。
+  void showToast(
+    String text, {
+    ToastKind kind = ToastKind.info,
+    Duration duration = const Duration(seconds: 4),
+  }) {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return;
+    // 连续两次同样的消息（比如连按两次备份）叠两条没有意义。
+    if (toasts.isNotEmpty && toasts.last.text == trimmed) {
+      _toastTimers.remove(toasts.last.id)?.cancel();
+      final last = toasts.removeLast();
+      _toastTimers[last.id]?.cancel();
+    }
+    final id = ++_toastSeq;
+    toasts.add(ToastMessage(id, trimmed, kind));
+    while (toasts.length > 3) {
+      final dropped = toasts.removeAt(0);
+      _toastTimers.remove(dropped.id)?.cancel();
+    }
+    _toastTimers[id] = Timer(duration, () => dismissToast(id));
+    notifyListeners();
+  }
+
+  void dismissToast(int id) {
+    _toastTimers.remove(id)?.cancel();
+    final before = toasts.length;
+    toasts.removeWhere((item) => item.id == id);
+    if (toasts.length != before) notifyListeners();
   }
 
   /// UI 侧改完公开字段后调它，把变更广播出去。
@@ -586,6 +640,10 @@ class AppState extends ChangeNotifier {
   void disposeState() {
     _autosave?.cancel();
     _backupTimer?.cancel();
+    for (final timer in _toastTimers.values) {
+      timer.cancel();
+    }
+    _toastTimers.clear();
     saveCurrent(force: true);
     super.dispose();
   }

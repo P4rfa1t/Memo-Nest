@@ -49,6 +49,13 @@ abstract class Host {
   /// 是否支持用平台密钥库托管库密钥（Windows DPAPI、Android Keystore）。
   bool get secretSupported;
 
+  /// [protectSecret] / [unprotectSecret] 是否已经内置了系统验证。
+  ///
+  /// Android 的 Keystore 密钥绑定了生物识别，`Cipher.init` 之后必须把
+  /// Cipher 交给 `BiometricPrompt` 才能用，所以验证是加解密的一部分。
+  /// 这种平台上调用方不要再单独调 [deviceAuthVerify]，否则会连弹两次。
+  bool get secretPromptBuiltIn;
+
   // ---------- 窗口 ----------
 
   /// 启动时初始化窗口系统。
@@ -92,7 +99,7 @@ abstract class Host {
   bool clipboardHasImage();
   ClipboardBitmap? readClipboardBitmap();
 
-  // ---------- 系统凭据验证 ----------
+  // ---------- 桌面集成 ----------
 
   /// 用系统文件管理器打开一个目录。Android 上没有这个概念，返回 false。
   Future<bool> openFolder(String path);
@@ -106,6 +113,8 @@ abstract class Host {
 
   /// 让系统开始拖动窗口（只在 [titleBarDragInDart] 为真时有意义）。
   Future<void> startWindowDrag();
+
+  // ---------- 系统凭据验证 ----------
 
   /// 这套系统验证在这台机器上叫什么（设置里直接显示给用户看）。
   ///

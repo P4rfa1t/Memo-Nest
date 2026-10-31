@@ -15,6 +15,7 @@ import 'package:path/path.dart' as p;
 import '../app_state.dart';
 import '../core/models.dart';
 import '../core/note_store.dart';
+import '../core/toast.dart';
 import 'editor_area.dart';
 import 'markdown_view.dart';
 import 'panels/menu_overlay.dart';
@@ -23,6 +24,7 @@ import 'panels/trash_panel.dart';
 import 'panels/vault_panel.dart';
 import 'theme.dart';
 import 'widgets/strip_button.dart';
+import 'widgets/toast_overlay.dart';
 
 class MainWindow extends StatefulWidget {
   final AppState state;
@@ -203,6 +205,8 @@ class _MainWindowState extends State<MainWindow> {
                       onDelete: _confirmDelete,
                     ),
                   ),
+                // 提示浮层放最上层：备份、导入的结果要比面板更显眼。
+                ToastOverlay(state: state),
               ],
             ),
           ),
@@ -225,8 +229,7 @@ class _MainWindowState extends State<MainWindow> {
   Future<void> _importNotes() async {
     final s = state.store;
     if (s == null) {
-      state.statusMessage = '数据还没准备好';
-      state.refresh();
+      state.showToast('数据还没准备好', kind: ToastKind.error);
       return;
     }
     final files = await openFiles(
@@ -259,11 +262,14 @@ class _MainWindowState extends State<MainWindow> {
       if (imported != null) state.selectNote(imported);
     }
     if (done == 0) {
-      state.statusMessage = '导入失败';
+      state.showToast('导入失败', kind: ToastKind.error);
     } else if (failed == 0) {
-      state.statusMessage = done == 1 ? '已导入 1 篇便签' : '已导入 $done 篇便签';
+      state.showToast(
+        done == 1 ? '已导入 1 篇便签' : '已导入 $done 篇便签',
+        kind: ToastKind.success,
+      );
     } else {
-      state.statusMessage = '已导入 $done 篇，$failed 篇失败';
+      state.showToast('已导入 $done 篇，$failed 篇失败', kind: ToastKind.error);
     }
     state.refresh();
   }
@@ -282,16 +288,17 @@ class _MainWindowState extends State<MainWindow> {
     );
     if (location == null) return;
     await File(location.path).writeAsString(note.content, encoding: utf8);
-    state.statusMessage = '已导出到 ${location.path}';
-    state.refresh();
+    state.showToast('已导出到 ${location.path}', kind: ToastKind.success);
   }
 
   Future<void> _openDataDir() async {
     final ok = await state.host.openFolder(state.paths.dataDir);
     if (ok) return;
     // 打不开就把路径摆出来让用户自己复制，比一句「失败」有用。
-    state.statusMessage = '数据目录：${state.paths.dataDir}';
-    state.refresh();
+    state.showToast(
+      '数据目录：${state.paths.dataDir}',
+      duration: const Duration(seconds: 10),
+    );
   }
 
   void _showHelp() {
@@ -753,6 +760,8 @@ class _MainWindowState extends State<MainWindow> {
   }
 
   // ---------- 状态栏 ----------
+  /// 底栏只放常驻信息（字数、更新时间）。一次性结果走 [ToastOverlay]：
+  /// 之前两者共用一行，消息一长就挤成一条看不清的小字。
   Widget _buildStatusBar() {
     final note = state.current;
     final stats = _stats(note?.content ?? '');
@@ -761,7 +770,7 @@ class _MainWindowState extends State<MainWindow> {
       child: Row(
         children: [
           Text(
-            state.statusMessage.isEmpty ? stats : state.statusMessage,
+            stats,
             style: const TextStyle(fontSize: 11, color: Palette.muted),
           ),
           const Spacer(),
