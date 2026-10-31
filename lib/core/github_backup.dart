@@ -12,6 +12,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 
 import 'github_api.dart';
+import 'github_sync.dart';
 import 'paths.dart';
 
 class GitHubError implements Exception {
@@ -27,7 +28,7 @@ class GitHubService {
 
   GitHubService(this.paths, this.config);
 
-  /// 推送成功返回一行可读结果。
+  /// 同步成功返回一行可读结果。
   ///
   /// 整个过程都是异步子进程：git push 是网络往返，同步跑会把 UI isolate
   /// 卡死几秒，界面直接「无响应」。
@@ -35,30 +36,32 @@ class GitHubService {
     // Android 上永远没有 git 可执行文件，HTTP API 是唯一可行路径；
     // engine 显式设成 git/api 时可以强制指定，排查哪条路出问题用。
     final engine = '${config.get('github.engine', 'auto')}'.trim();
+    final git = await _which('git');
+    // 选了 git 但机器上没装：别直接失败，退到 API，用户要的是备份能跑通。
     final useApi = engine == 'api' || (engine != 'git' && Platform.isAndroid);
-    if (useApi) {
-      // 两条路产出的仓库内容一致（notes/*.md + vault/*），可以随时切换。
-      return GitHubApi(paths).push(config);
+    if (useApi || git == null) {
+      // 两条路产出的仓库内容一致（notes/*.md + index.json + vault/*），
+      // 可以随时切换。
+      return GitHubApi(paths).sync(config);
     }
 
-    final git = await _which('git');
-    if (git == null) {
-      throw GitHubError('未检测到 Git，请先安装 https://git-scm.com/download/win');
-    }
+    // git 只负责「提交」，取回与合并仍然走 API 的同一套逻辑：
+    // git 的三方合并对便签没有意义，合并必须在笔记层面做。
+    final api = GitHubApi(paths);
+    final plan = await api.pullMerge(config);
+    final mergeSummary = plan.counts.describe(
+      (config.get('github.repo', '') as String?)?.trim() ?? 'GitHub',
+      (config.get('github.branch', 'main') as String?)?.trim() ?? 'main',
+    );
 
     final branch = (config.get('github.branch', 'main') as String?)?.trim();
     final useBranch = (branch == null || branch.isEmpty) ? 'main' : branch;
     final url = _remoteUrl();
     final plain = _plainRemote(url);
 
-    // vaultMetaPath 是文件（data/vault/vault.json），不是目录。原来用
-    // Directory(...).existsSync() 判断，永远为 false，于是有私密库的用户
-    // 也只会推 data/notes，.mdenc 密文完全没进备份。
-    final hasVault = File(paths.vaultMetaPath).existsSync() ||
-        Directory(paths.vaultItemsDir).existsSync();
-    final workDir = hasVault
-        ? _stageSource()
-        : (Directory(paths.notesDir)..createSync(recursive: true));
+    // 暂存目录里放的是合并后的最终状态（含 index.json），
+    // 私密库存在时 .mdenc 密文也一起进来。
+    final workDir = _stageSource();
 
     if (!Directory(p.join(workDir.path, '.git')).existsSync()) {
       await _git(git, ['init', '-b', useBranch], workDir);
@@ -99,7 +102,7 @@ class GitHubService {
       String two(int v) => v.toString().padLeft(2, '0');
       final stamp = '${now.year}-${two(now.month)}-${two(now.day)} '
           '${two(now.hour)}:${two(now.minute)}:${two(now.second)}';
-      await _git(git, ['commit', '-m', '备忘录自动备份 $stamp'], workDir);
+      await _git(git, ['commit', '-m', '备忘录同步 $stamp'], workDir);
       committed = true;
     }
 
@@ -137,8 +140,10 @@ class GitHubService {
       }
     }
 
-    final repo = (config.get('github.repo', '') as String?) ?? 'GitHub';
-    return '已推送 $repo（$useBranch 分支）${committed ? '' : '，无新变更'}';
+    GitHubSync(paths).commitManifest(plan);
+    final parts = <String>[mergeSummary];
+    if (!committed) parts.add('云端无新变更');
+    return parts.join('；');
   }
 
   /// 拼出带 token 的推送地址。token 只在这个字符串里存在。
@@ -165,69 +170,46 @@ class GitHubService {
   static String _plainRemote(String url) =>
       url.replaceAll(RegExp(r'(?<=//)[^/@]+@'), '');
 
-  /// 把普通笔记与私密库密文汇总到 `data/github`，避免污染 `data/notes`。
+  /// 把普通笔记、`index.json` 与私密库密文汇总到 `data/github`，
+  /// 避免污染 `data/notes`。
+  ///
+  /// 布局与 HTTP 版完全一致（`notes/*.md` + `index.json` + `vault/*`），
+  /// 这样两个引擎提交出来的仓库可以互相接续。
   Directory _stageSource() {
     final staging = Directory(p.join(paths.dataDir, 'github'))
       ..createSync(recursive: true);
 
-    final current = <String>{};
-    final notes = Directory(paths.notesDir);
-    if (notes.existsSync()) {
-      for (final file in notes.listSync().whereType<File>()) {
-        if (!file.path.toLowerCase().endsWith('.md')) continue;
-        final name = p.basename(file.path);
-        file.copySync(p.join(staging.path, name));
-        current.add(name);
+    // 只清内容，**绝不动 .git**——整棵删掉会把提交历史一起丢掉。
+    for (final name in ['notes', 'vault']) {
+      final dir = Directory(p.join(staging.path, name));
+      if (dir.existsSync()) {
+        for (final entity in dir.listSync()) {
+          try {
+            entity.deleteSync(recursive: true);
+          } on FileSystemException {
+            // 删不掉就覆盖
+          }
+        }
       }
     }
-    for (final stale in staging.listSync().whereType<File>()) {
-      final name = p.basename(stale.path);
-      if (!name.toLowerCase().endsWith('.md')) continue;
-      if (current.contains(name)) continue;
+    for (final entity in staging.listSync()) {
+      if (entity is! File) continue;
+      if (!entity.path.toLowerCase().endsWith('.md')) continue;
       try {
-        stale.deleteSync();
+        entity.deleteSync();
       } on FileSystemException {
         // 忽略
       }
     }
 
-    final itemsTarget = Directory(p.join(staging.path, 'vault', 'items'))
-      ..createSync(recursive: true);
-    final encrypted = <String>{};
-    final items = Directory(paths.vaultItemsDir);
-    if (items.existsSync()) {
-      for (final file in items.listSync().whereType<File>()) {
-        if (!file.path.toLowerCase().endsWith('.mdenc')) continue;
-        final name = p.basename(file.path);
-        file.copySync(p.join(itemsTarget.path, name));
-        encrypted.add(name);
-      }
-    }
-    for (final stale in itemsTarget.listSync().whereType<File>()) {
-      if (encrypted.contains(p.basename(stale.path))) continue;
-      try {
-        stale.deleteSync();
-      } on FileSystemException {
-        // 忽略
-      }
-    }
-
-    final meta = File(paths.vaultMetaPath);
-    if (meta.existsSync()) {
-      Map<String, dynamic> payload = {};
-      try {
-        final decoded = json.decode(meta.readAsStringSync());
-        if (decoded is Map<String, dynamic>) payload = decoded;
-      } on FormatException {
-        payload = {};
-      } on FileSystemException {
-        payload = {};
-      }
-      payload.remove('dpapi_key');
-      File(p.join(staging.path, 'vault', 'vault.json')).writeAsStringSync(
-        const JsonEncoder.withIndent('  ').convert(payload),
-        encoding: utf8,
-      );
+    final sync = GitHubSync(paths);
+    final localNotes = sync.readLocalIndex();
+    final files =
+        sync.collectRepoFiles(localNotes, sync.readLocalContents(localNotes));
+    for (final entry in files.entries) {
+      final target = File(p.join(staging.path, entry.key));
+      target.parent.createSync(recursive: true);
+      target.writeAsBytesSync(entry.value, flush: true);
     }
     return staging;
   }

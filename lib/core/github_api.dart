@@ -1,4 +1,4 @@
-/// GitHub 备份的 HTTP 实现：不依赖 git 可执行文件。
+/// GitHub 同步的 HTTP 实现：不依赖 git 可执行文件。
 ///
 /// [GitHubService] 走本地 git 子进程，Windows/Linux 桌面没问题，
 /// 但 Android 上根本没有 git 可执行文件，只能改用 API。这里用
@@ -6,14 +6,15 @@
 ///
 /// 1. `GET /repos/{owner}/{repo}/git/ref/heads/{branch}` 拿父提交
 /// 2. `GET /repos/{owner}/{repo}/git/commits/{sha}` 拿父树 sha
-/// 3. `POST /blobs` 逐个上传改动过的文件（哈希未变的复用旧 blob）
-/// 4. `POST /trees` 用 `base_tree` 整树重建（清单里没有的自动删除）
-/// 5. `POST /commits` + `PATCH /git/refs/heads/{branch}` 前移分支
+/// 3. 递归读父树，把云端文件取回来跟本地做三方合并（见 [GitHubSync]）
+/// 4. `POST /blobs` 逐个上传合并后变化过的文件（哈希未变的复用旧 blob）
+/// 5. `POST /trees` 用 `base_tree` 整树重建（合并判定该删的设 `sha: null`）
+/// 6. `POST /commits` + `PATCH /git/refs/heads/{branch}` 前移分支
 ///
 /// 与 git 版的行为对齐：
 /// - token 只出现在请求头里，不落到任何文件
 /// - 私密库存在时把 `.mdenc` 密文与 `vault.json`（去掉 `dpapi_key`）一起传
-/// - 云端清单之外的旧文件被删除，避免删掉的便签一直留着
+/// - 仓库布局统一为 `notes/*.md` + `index.json` + `vault/*`，两个引擎可以互换
 library;
 
 import 'dart:async';
@@ -23,6 +24,7 @@ import 'dart:typed_data';
 
 import 'package:pointycastle/digests/sha1.dart';
 
+import 'github_sync.dart';
 import 'paths.dart';
 
 /// GitHub 侧的失败。文案可以直接显示给用户。
@@ -41,10 +43,10 @@ class CommitFile {
 
   CommitFile(this.path, this.bytes);
 
-  /// GitHub 的 blob sha = `sha1("blob <字节数>\0" + 内容)`。
+  /// GitHub 的 blob sha = `sha1("blob <字节数>\\0" + 内容)`。
   ///
   /// 用它判断文件要不要重传：云端已有同 sha 的 blob 就不再 POST，
-  /// 否则每次备份都要把全部便签重传一遍。
+  /// 否则每次同步都要把全部便签重传一遍。
   String get blobSha {
     final header = utf8.encode('blob ${bytes.length}\u0000');
     final digest = SHA1Digest();
@@ -83,70 +85,28 @@ class GitHubApi {
   String get _endpoint =>
       (endpointOverride ?? _defaultEndpoint).replaceAll(RegExp(r'/+$'), '');
 
+  GitHubSync get _sync => GitHubSync(paths);
+
   /// 把笔记目录与私密库密文整理成待提交清单。
   ///
-  /// 顺序固定（`notes/` 在前、`vault/` 在后，各自按文件名排序），
-  /// 让测试和日志可复现。内容完全取自磁盘——git 版那个 `data/github`
-  /// 暂存目录是为了不污染 `data/notes` 才建的，HTTP 版没有工作区概念，
-  /// 不需要它。
+  /// 顺序固定（`notes/` → `index.json` → `vault/`），让测试和日志可复现。
+  /// 内容完全取自磁盘——git 版那个 `data/github` 暂存目录是为了不污染
+  /// `data/notes` 才建的，HTTP 版没有工作区概念，不需要它。
   List<CommitFile> collectFiles(Config config) {
-    final files = <CommitFile>[];
-    final notes = Directory(paths.notesDir);
-    if (notes.existsSync()) {
-      final pathsList = notes
-          .listSync()
-          .whereType<File>()
-          .map((f) => f.path)
-          .where((path) => path.toLowerCase().endsWith('.md'))
-          .toList()
-        ..sort();
-      for (final path in pathsList) {
-        files.add(CommitFile(
-          'notes/${_basename(path)}',
-          File(path).readAsBytesSync(),
-        ));
-      }
-    }
-
-    final meta = File(paths.vaultMetaPath);
-    final items = Directory(paths.vaultItemsDir);
-    if (items.existsSync()) {
-      final pathsList = items
-          .listSync()
-          .whereType<File>()
-          .map((f) => f.path)
-          .where((path) => path.toLowerCase().endsWith('.mdenc'))
-          .toList()
-        ..sort();
-      for (final path in pathsList) {
-        files.add(CommitFile(
-          'vault/items/${_basename(path)}',
-          File(path).readAsBytesSync(),
-        ));
-      }
-    }
-    if (meta.existsSync()) {
-      Map<String, dynamic> payload = {};
-      try {
-        final decoded = json.decode(meta.readAsStringSync());
-        if (decoded is Map<String, dynamic>) payload = decoded;
-      } on FormatException {
-        payload = {};
-      } on FileSystemException {
-        payload = {};
-      }
-      // 与 git 版一致：这台机器的密钥材料绝不进备份。
-      payload.remove('dpapi_key');
-      files.add(CommitFile(
-        'vault/vault.json',
-        utf8.encode(const JsonEncoder.withIndent('  ').convert(payload)),
-      ));
-    }
-    return files;
+    final sync = _sync;
+    final localNotes = sync.readLocalIndex();
+    final files =
+        sync.collectRepoFiles(localNotes, sync.readLocalContents(localNotes));
+    return [
+      for (final entry in files.entries) CommitFile(entry.key, entry.value),
+    ];
   }
 
-  /// 提交并推送。返回一行可读结果。
-  Future<String> push(Config config) async {
+  /// 取回云端、与本地合并、把结果落到磁盘。返回合并计划。
+  ///
+  /// 单独抽出来是给 git 引擎用的：它要自己做 commit，所以只借用
+  /// 「取回 + 合并」这一段，之后用 git 提交磁盘上的合并结果。
+  Future<SyncPlan> pullMerge(Config config) async {
     final repo = _repoOf(config);
     final token = _tokenOf(config);
     final branch = _branchOf(config);
@@ -154,9 +114,60 @@ class GitHubApi {
       ..connectionTimeout = const Duration(seconds: 20);
 
     try {
-      final files = collectFiles(config);
+      final sync = _sync;
+      final localNotes = sync.readLocalIndex();
+      final localFiles =
+          sync.collectRepoFiles(localNotes, sync.readLocalContents(localNotes));
 
-      // 分支还不存在时（空仓库）没有父提交，走首次提交。
+      final remote = <String, List<int>>{};
+      final existing = await _headTree(client, repo, token, branch);
+      for (final entry in existing.entries) {
+        final path = entry.key;
+        if (path != indexFileName && !path.startsWith(notesPrefix)) continue;
+        final localBytes = localFiles[path];
+        // 本地这份跟云端同一个 blob sha，内容必然一致，省掉一次下载。
+        if (localBytes != null &&
+            CommitFile(path, localBytes).blobSha == entry.value) {
+          remote[path] = localBytes;
+          continue;
+        }
+        remote[path] = await _readBlob(client, repo, token, entry.value);
+      }
+
+      final plan = sync.merge(remote);
+      if (plan.localDirty) sync.applyLocal(plan);
+      return plan;
+    } on SocketException catch (e) {
+      throw GitApiError('网络连接失败：${e.message}');
+    } on HandshakeException catch (e) {
+      throw GitApiError('HTTPS 握手失败：${e.message}');
+    } on TimeoutException {
+      throw GitApiError('请求超时，请检查网络');
+    } on FormatException {
+      throw GitApiError('GitHub 返回的内容不是合法 JSON');
+    } finally {
+      client.close(force: true);
+    }
+  }
+
+  /// 双向同步：取回云端 → 三方合并 → 提交合并结果。返回一行可读结果。
+  Future<String> sync(Config config) async {
+    final repo = _repoOf(config);
+    final token = _tokenOf(config);
+    final branch = _branchOf(config);
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 20);
+
+    try {
+      final sync = _sync;
+      final plan = await pullMerge(config);
+
+      // 合并之后磁盘就是最终状态，直接按它建树。
+      final files = [
+        for (final entry in plan.files.entries)
+          CommitFile(entry.key, entry.value),
+      ];
+
       String? parentSha;
       var treeSha = '';
       final existing = <String, String>{};
@@ -166,10 +177,8 @@ class GitHubApi {
             client, 'GET', '$_endpoint/repos/$repo/git/ref/heads/$branch',
             token: token);
       } on GitApiError catch (e) {
-        // 404 说明分支还没建，首次推送；其余错误照抛。
-        if (!e.message.startsWith('HTTP 404') && !e.message.contains('404')) {
-          rethrow;
-        }
+        // 404 说明分支还没建，首次提交；其余错误照抛。
+        if (!e.message.contains('404')) rethrow;
         head = null;
       }
       if (head is Map) {
@@ -188,13 +197,11 @@ class GitHubApi {
       }
 
       final created = <String, String>{};
-      final unchanged = <String>[];
-      final planned = <String>{};
+      var unchanged = 0;
       for (final file in files) {
-        planned.add(file.path);
         final digest = file.blobSha;
         if (existing[file.path] == digest) {
-          unchanged.add(file.path);
+          unchanged++;
           continue;
         }
         final blob = await _send(
@@ -214,12 +221,12 @@ class GitHubApi {
         created[file.path] = sha;
       }
 
-      // 云端有、本次清单没有的，一律标成删除，否则删掉的便签会一直留着。
-      final removed =
-          existing.keys.where((path) => !planned.contains(path)).toList();
+      // 只删合并判定该删的；`existing` 里别的东西（README、.gitignore）一律不动。
+      final removed = plan.removals.where(existing.containsKey).toList();
 
       if (created.isEmpty && removed.isEmpty) {
-        return '已是最新（$repo $branch 分支）';
+        sync.commitManifest(plan);
+        return plan.counts.describe(repo, branch);
       }
 
       final entries = <Map<String, dynamic>>[
@@ -252,7 +259,7 @@ class GitHubApi {
         '$_endpoint/repos/$repo/git/commits',
         token: token,
         body: {
-          'message': '备忘录自动备份 ${_stampNow()}',
+          'message': '备忘录同步 ${_stampNow()}',
           'tree': newTree,
           'parents': parentSha == null ? <String>[] : <String>[parentSha],
           'author': {
@@ -276,12 +283,14 @@ class GitHubApi {
             token: token, body: {'sha': commitSha, 'force': false});
       }
 
-      final parts = <String>[];
-      if (created.isNotEmpty) parts.add('上传 ${created.length} 个文件');
-      if (removed.isNotEmpty) parts.add('删除 ${removed.length} 个');
-      if (unchanged.isNotEmpty) parts.add('未变 ${unchanged.length} 个');
-      if (parts.isEmpty) parts.add('无变更');
-      return '已推送 $repo（$branch 分支）：${parts.join('，')}';
+      sync.commitManifest(plan);
+
+      final detail = <String>[
+        if (plan.counts.touchedLocal || plan.counts.touchedRemote)
+          plan.counts.describe(repo, branch),
+        if (unchanged > 0 && created.isNotEmpty) '未变 $unchanged 个',
+      ].join('；');
+      return detail;
     } on SocketException catch (e) {
       throw GitApiError('网络连接失败：${e.message}');
     } on HandshakeException catch (e) {
@@ -294,6 +303,9 @@ class GitHubApi {
       client.close(force: true);
     }
   }
+
+  /// 保留旧名字：外部只关心「跑一次同步」。
+  Future<String> push(Config config) => sync(config);
 
   /// token 是否有效、目标仓库是否存在。设置页用来做「测试连接」。
   Future<String> verify(Config config) async {
@@ -321,7 +333,39 @@ class GitHubApi {
 
   // ---------- 内部 ----------
 
-  /// 递归读父树，压成 `路径 -> blob sha`。
+  /// 分支头 → 父提交的树 → 递归展开成 `路径 -> blob sha`。
+  /// 分支不存在（空仓库）时返回空表。
+  Future<Map<String, String>> _headTree(
+    HttpClient client,
+    String repo,
+    String token,
+    String branch,
+  ) async {
+    final result = <String, String>{};
+    Object? head;
+    try {
+      head = await _send(
+          client, 'GET', '$_endpoint/repos/$repo/git/ref/heads/$branch',
+          token: token);
+    } on GitApiError catch (e) {
+      if (!e.message.contains('404')) rethrow;
+      return result;
+    }
+    if (head is! Map) return result;
+    final commitRef = head['object'];
+    if (commitRef is! Map || commitRef['sha'] is! String) return result;
+    final commit = await _send(
+        client, 'GET', '$_endpoint/repos/$repo/git/commits/${commitRef['sha']}',
+        token: token);
+    final tree = commit is Map ? commit['tree'] : null;
+    if (tree is Map && tree['sha'] is String) {
+      result
+          .addAll(await _readTree(client, repo, token, tree['sha'] as String));
+    }
+    return result;
+  }
+
+  /// 递归读树，压成 `路径 -> blob sha`。
   Future<Map<String, String>> _readTree(
     HttpClient client,
     String repo,
@@ -345,6 +389,26 @@ class GitHubApi {
       }
     }
     return result;
+  }
+
+  /// 取某个 blob 的内容。
+  Future<List<int>> _readBlob(
+    HttpClient client,
+    String repo,
+    String token,
+    String sha,
+  ) async {
+    final reply = await _send(
+        client, 'GET', '$_endpoint/repos/$repo/git/blobs/$sha',
+        token: token);
+    if (reply is! Map) return const <int>[];
+    final content = reply['content'];
+    if (content is! String) return const <int>[];
+    try {
+      return base64.decode(content.replaceAll(RegExp(r'\s'), ''));
+    } on FormatException {
+      return const <int>[];
+    }
   }
 
   String _repoOf(Config config) {
@@ -424,6 +488,4 @@ class GitHubApi {
     return '${now.year}-${two(now.month)}-${two(now.day)} '
         '${two(now.hour)}:${two(now.minute)}:${two(now.second)}';
   }
-
-  static String _basename(String path) => path.split(RegExp(r'[\\/]')).last;
 }

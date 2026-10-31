@@ -132,6 +132,9 @@ void main() {
     expect(names, [
       'notes/a.md',
       'notes/b.md',
+      // 索引也进仓库：同步要靠它判断「哪一篇被删了」，
+      // 只传 md 的话云端的删除意图完全看不出来。
+      'index.json',
       'vault/items/secret.mdenc',
       'vault/vault.json',
     ]);
@@ -145,7 +148,7 @@ void main() {
     expect(decoded['version'], 1);
   });
 
-  test('首次推送：建分支、上传文件、返回上传数量', () async {
+  test('首次同步：建分支、上传笔记与索引、返回同步结果', () async {
     writeNote(paths, 'a.md', '# A\n');
     final blobs = <String, String>{};
     final trees = <Map<String, dynamic>>[];
@@ -180,15 +183,24 @@ void main() {
 
     final summary = await api().push(config);
 
-    expect(summary, contains('已推送 someone/notes'));
-    expect(summary, contains('上传 1 个文件'));
-    // 首次推送没有父树，不能带 base_tree。
+    expect(summary, contains('已同步 someone/notes'));
+    // 云端空，本地这篇算「上传新增」。
+    expect(summary, contains('上传新增 1'));
+    // 首次同步没有父树，不能带 base_tree。
     expect(trees.single.containsKey('base_tree'), isFalse);
-    final entries = trees.single['tree'] as List;
-    expect(entries.single['path'], 'notes/a.md');
-    expect(entries.single['sha'], isNotNull);
+    final entries = (trees.single['tree'] as List).cast<Map<String, dynamic>>();
+    expect(
+        entries.map((e) => e['path']),
+        containsAll(<String>[
+          'notes/a.md',
+          'index.json',
+        ]));
+    for (final entry in entries) {
+      expect(entry['sha'], isNotNull);
+    }
     expect(createdRef, isNotNull);
-    expect(blobs.length, 1);
+    // 笔记 + 索引两个新 blob。
+    expect(blobs.length, 2);
   });
 
   test('增量推送：未变文件不重传，云端多余的文件被删除', () async {
@@ -230,6 +242,16 @@ void main() {
           })
         );
       }
+      // 云端有、本地没有的笔记会被下载下来参与合并。
+      if (route == 'GET /repos/someone/notes/git/blobs/old-sha') {
+        return (
+          200,
+          json.encode({
+            'content': base64.encode(utf8.encode('# gone\n')),
+            'encoding': 'base64',
+          })
+        );
+      }
       if (route == 'POST /repos/someone/notes/git/blobs') {
         final body = json.decode(request.body) as Map<String, dynamic>;
         final content = base64.decode('${body['content']}');
@@ -252,24 +274,63 @@ void main() {
 
     final summary = await api().push(config);
 
-    // keep.md 的 blob 云端已有，只需重传 new.md。
-    expect(posted.length, 1);
-    expect(posted.single, isNot(keepSha));
-    expect(summary, contains('上传 1 个文件'));
-    expect(summary, contains('删除 1 个'));
+    // keep.md 的 blob 云端已有（sha 相同直接复用本地字节，不下载），
+    // 只需重传 new.md 与索引。
+    expect(posted.length, 2);
+    expect(posted, isNot(contains(keepSha)));
+    expect(summary, contains('上传新增 2'));
     expect(summary, contains('未变 1 个'));
 
     expect(treeBody, isNotNull);
     expect(treeBody!['base_tree'], 'tree-0');
     final entries = (treeBody!['tree'] as List).cast<Map<String, dynamic>>();
+    // 云端多出来的孤儿笔记被删掉；README 之类不在清理范围内。
     final deleted = entries.where((e) => e['sha'] == null).toList();
     expect(deleted.single['path'], 'notes/gone.md');
   });
 
-  test('无变更时不产生提交', () async {
+  test('两边一致时不产生提交', () async {
+    // 造一个「上次同步刚刚完成」的状态：本地 index.json、笔记、基准点
+    // 三者一致，云端结构与本地完全相同。这时再同步一次应当什么都不做。
+    const noteId = 'n1';
+    const stamp = '2026-01-01 00:00:00';
+    final note = <String, dynamic>{
+      'id': noteId,
+      'title': 'keep',
+      'filename': 'keep.md',
+      'tags': <String>[],
+      'created': stamp,
+      'updated': stamp,
+    };
+    Directory(paths.dataDir).createSync(recursive: true);
+    File(paths.indexPath).writeAsStringSync(
+      json.encode({
+        'version': 1,
+        'notes': [note],
+      }),
+      encoding: utf8,
+    );
     writeNote(paths, 'keep.md', '# keep\n');
-    final keepSha = CommitFile('x', utf8.encode('# keep\n')).blobSha;
+    File('${paths.dataDir}${Platform.pathSeparator}github-sync.json')
+        .writeAsStringSync(
+      json.encode({
+        'version': 1,
+        'notes': {
+          noteId: {'updated': stamp, 'filename': 'keep.md', 'title': 'keep'},
+        },
+      }),
+      encoding: utf8,
+    );
+
+    // 云端树直接用本地产出的那份，sha 必然对得上。
+    final localFiles = api().collectFiles(config);
+    final remoteTree = <Map<String, dynamic>>[
+      for (final file in localFiles)
+        {'path': file.path, 'type': 'blob', 'sha': file.blobSha},
+    ];
+
     var commits = 0;
+    var uploads = 0;
 
     github.handler = (request) async {
       final route = '${request.method} ${request.path}';
@@ -290,14 +351,11 @@ void main() {
         );
       }
       if (route.startsWith('GET /repos/someone/notes/git/trees/tree-0')) {
-        return (
-          200,
-          json.encode({
-            'tree': [
-              {'path': 'notes/keep.md', 'type': 'blob', 'sha': keepSha},
-            ],
-          })
-        );
+        return (200, json.encode({'tree': remoteTree}));
+      }
+      if (route == 'POST /repos/someone/notes/git/blobs') {
+        uploads++;
+        return (201, json.encode({'sha': 'unexpected'}));
       }
       if (route == 'POST /repos/someone/notes/git/commits') {
         commits++;
@@ -307,6 +365,7 @@ void main() {
     };
 
     final summary = await api().push(config);
+    expect(uploads, 0);
     expect(commits, 0);
     expect(summary, contains('已是最新'));
   });

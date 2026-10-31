@@ -32,6 +32,9 @@ class _EditorAreaState extends State<EditorArea> {
   final UndoHistoryController _undo = UndoHistoryController();
   String? _boundNoteId;
 
+  /// 上次灌入输入框时的内容版本，见 [AppState.contentRevision]。
+  int _boundRevision = 0;
+
   /// 右键菜单开着时记下它的关闭回调。
   ///
   /// 菜单挂在 Overlay 里、不在输入框的焦点链上，Esc 到不了它；
@@ -89,8 +92,13 @@ class _EditorAreaState extends State<EditorArea> {
       if (_bodyController.text.isNotEmpty) _bodyController.clear();
       return;
     }
-    if (note.id == _boundNoteId) return;
+    // 同一个 id 但磁盘内容被外部改过（GitHub 同步取回了新版本）时也要重灌，
+    // 否则输入框还留着旧文字，下一次自动保存又把旧内容写回去。
+    if (note.id == _boundNoteId && state.contentRevision == _boundRevision) {
+      return;
+    }
     _boundNoteId = note.id;
+    _boundRevision = state.contentRevision;
     _titleController.text = note.title;
     _tagsController.text = note.tags.join(', ');
     _bodyController.text = note.content;

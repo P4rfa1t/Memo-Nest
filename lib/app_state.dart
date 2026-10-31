@@ -34,6 +34,11 @@ class AppState extends ChangeNotifier {
   final AppPaths paths;
   late final Config config;
   late NoteStore plainStore;
+
+  /// 每次「磁盘上的笔记被外部改写」（目前只有 GitHub 同步）就 +1，
+  /// 编辑区据此判断要不要把输入框里的内容换成新的，而不是每敲一个字都重灌。
+  int _contentRevision = 0;
+  int get contentRevision => _contentRevision;
   Vault? vault;
   VaultStore? vaultStore;
 
@@ -533,14 +538,46 @@ class AppState extends ChangeNotifier {
     }
 
     if (config.get('github.enabled', false) == true) {
+      // 同步是一次三方合并，本地磁盘必须是「用户看到的最后状态」，
+      // 否则刚敲的字会被云端旧版本覆盖掉。
+      saveCurrent(force: true);
       try {
         steps.add('GitHub ${await github.push()}');
+        // 合并可能改了本地笔记，重新读盘让列表与编辑器对齐。
+        reloadNotesFromDisk();
       } on GitHubError catch (e) {
         steps.add('GitHub 失败：${e.message}');
       } on GitApiError catch (e) {
         steps.add('GitHub 失败：${e.message}');
       }
     }
+  }
+
+  /// GitHub 同步可能在本地增删改便签，跑完必须重新读盘。
+  ///
+  /// 不重新读的后果是双重的：界面还显示旧列表；更糟的是下一次
+  /// `saveCurrent` 会把内存里的旧记录连同旧 `index.json` 写回去，
+  /// 把刚取回来的便签全抹掉。
+  void reloadNotesFromDisk() {
+    final keepId = current?.id;
+    try {
+      plainStore.load();
+    } on FileSystemException {
+      return;
+    }
+    final notes = plainStore.allNotes();
+    Note? next;
+    for (final note in notes) {
+      if (note.id == keepId) {
+        next = note;
+        break;
+      }
+    }
+    next ??= notes.isEmpty ? null : notes.first;
+    current = next;
+    _dirty = false;
+    _contentRevision++;
+    notifyListeners();
   }
 
   /// 上次备份之后有没有改动过（决定退出时要不要备份）。
