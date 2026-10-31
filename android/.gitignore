@@ -7,8 +7,9 @@ gradle-wrapper.jar
 GeneratedPluginRegistrant.java
 .cxx/
 
-# Remember to never publicly share your keystore.
-# See https://flutter.dev/to/reference-keystore
-key.properties
-**/*.keystore
-**/*.jks
+# 发布密钥**故意**进仓库：这是一个个人离线笔记工具，签名只用来保证
+# 同一个应用身份，让不同机器 / CI 构建的 APK 能覆盖安装。理由与替换
+# 方法写在 key.properties 顶部。
+# 不要在这里恢复 key.properties / *.jks 的忽略规则。
+!key.properties
+!app/memonest-release.jks

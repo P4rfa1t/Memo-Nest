@@ -1,8 +1,5 @@
 package com.memonest.memonest
 
-import android.os.Build
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyPermanentlyInvalidatedException
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import androidx.annotation.NonNull
@@ -13,7 +10,6 @@ import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.security.KeyStore
-import java.security.UnrecoverableKeyException
 import javax.crypto.AEADBadTagException
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -29,17 +25,23 @@ import javax.crypto.spec.GCMParameterSpec
  * - protect      用 Keystore 里的 AES 密钥加密一段字节
  * - unprotect    解密
  *
- * ## 为什么 protect / unprotect 要自己弹验证
+ * ## 设计：与 Windows 的 DPAPI 同构
  *
- * 密钥是用 `setUserAuthenticationRequired(true)` 生成的，Keystore 不允许
- * 在「刚验证过」之外的时间窗口里使用它——`Cipher.init` 会直接抛
- * `UserNotAuthenticatedException`。正确用法是把初始化好的 Cipher 交给
- * `BiometricPrompt` 的 `CryptoObject`，验证通过后系统才把 Cipher 解锁，
- * 这时才能 `doFinal`。
+ * Windows 上托管用的是 `CryptProtectData`——密钥由系统按当前用户派生，
+ * 加解密本身**不要求**先通过 Hello 验证，Hello 只是另一道门（Dart 侧
+ * `HelloUnlock.retrieve()` 先 `verify()` 再 DPAPI 解密）。
  *
- * 之前的实现没走 CryptoObject，于是 `protect` 在「刚输完主密码、
- * 没有任何生物验证」的时刻必然失败，`hello.bin` 从来没写出来过，
- * 表现就是「明明用主密码解锁过了，还是提示没有可用凭据」。
+ * Android 早期实现走的是另一条路：`setUserAuthenticationRequired(true)`
+ * 把生物验证焊死在密钥上，加解密必须用 `BiometricPrompt.CryptoObject`。
+ * 这条路在真机上极脆——`Cipher.init` 就可能抛 `UserNotAuthenticatedException`
+ * （不在已知异常列表里，于是 UI 只看到「准备加密失败」），密钥一旦因为
+ * 换指纹、改锁屏密码被作废就更没法兜底。结果是 `hello.bin` 从来没被写出来，
+ * 用户明明用主密码解锁过，界面还是提示「没有可用的系统凭据」。
+ *
+ * 现在改成和 Windows 一致的模型：Keystore 里放一把**设备绑定**的
+ * AES-256-GCM 密钥（受 TEE/StrongBox 保护，出不了这台设备），
+ * 生物验证由 `BiometricPrompt` 在加解密之前单独做一次。安全性不降级
+ * （明文库密钥仍然只以密文形式落盘），但整类 Keystore 认证强制失败消失了。
  *
  * 因为验证已经内置在 protect / unprotect 里，Dart 侧对 Android 不再
  * 单独调 `authenticate`（`Host.secretPromptBuiltIn` 为 true），
@@ -53,22 +55,34 @@ class MainActivity : FlutterFragmentActivity() {
         private const val CHANNEL = "memonest/hello"
 
         /**
-         * 密钥别名。旧版用 `memonest_vault_key`，那把钥匙生成时要求
-         * AUTH_BIOMETRIC_STRONG，而验证对话框用的是 BIOMETRIC_WEAK，
-         * 两者对不上，验证通过也用不了。换个别名重新生成。
+         * 密钥别名。
+         *
+         * - `memonest_vault_key`   最初版本，要求 AUTH_BIOMETRIC_STRONG
+         * - `memonest_vault_key_v2` 要求「每次使用都当场验证」，但没有走
+         *   CryptoObject，加解密必然抛 UserNotAuthenticatedException
+         * - `_v3` 就是现在这把：设备绑定、不要求认证，验证交给 BiometricPrompt
+         *
+         * 旧的两把都留着当遗物，解析密钥时顺手删掉——它们永远用不了了，
+         * 留着只会让人以为凭据还在。
          */
-        private const val KEY_ALIAS = "memonest_vault_key_v2"
-        private const val LEGACY_ALIAS = "memonest_vault_key"
+        private const val KEY_ALIAS = "memonest_vault_key_v3"
+        private val LEGACY_ALIASES = listOf(
+            "memonest_vault_key",
+            "memonest_vault_key_v2",
+        )
 
         private const val TRANSFORMATION = "AES/GCM/NoPadding"
         private const val GCM_TAG_BITS = 128
-
-        /** 密钥和验证对话框必须用同一档认证强度，否则解锁不了。 */
-        private const val AUTHENTICATORS = BiometricManager.Authenticators.BIOMETRIC_WEAK
     }
 
     /** BiometricPrompt 是异步回调的，这里挂住等待中的 Dart 结果。 */
     private var pendingResult: MethodChannel.Result? = null
+
+    /** 验证通过后要做的加解密。 */
+    private var onVerified: ((MethodChannel.Result) -> Unit)? = null
+
+    /** 用户取消或出错时的回调。 */
+    private var onCancel: ((MethodChannel.Result) -> Unit)? = null
 
     override fun configureFlutterEngine(@NonNull flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -101,9 +115,42 @@ class MainActivity : FlutterFragmentActivity() {
             }
     }
 
-    private fun biometricAvailable(): Boolean {
+    // ---------- 能力探测 ----------
+
+    /**
+     * 能用的认证方式。指纹/面容优先，没有生物识别时退回锁屏密码——
+     * 后者在很多国产 ROM 上反而是唯一可用的那一档。
+     */
+    private fun authenticators(): Int {
         val manager = BiometricManager.from(this)
-        return manager.canAuthenticate(AUTHENTICATORS) == BiometricManager.BIOMETRIC_SUCCESS
+        val success = BiometricManager.BIOMETRIC_SUCCESS
+        if (manager.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_WEAK) == success) {
+            return BiometricManager.Authenticators.BIOMETRIC_WEAK
+        }
+        if (manager.canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG) == success) {
+            return BiometricManager.Authenticators.BIOMETRIC_STRONG
+        }
+        if (manager.canAuthenticate(BiometricManager.Authenticators.DEVICE_CREDENTIAL) == success) {
+            return BiometricManager.Authenticators.DEVICE_CREDENTIAL
+        }
+        return 0
+    }
+
+    private fun biometricAvailable(): Boolean = authenticators() != 0
+
+    private fun promptInfo(title: String, subtitle: String): BiometricPrompt.PromptInfo {
+        val allowed = authenticators()
+        val builder = BiometricPrompt.PromptInfo.Builder()
+            .setTitle(title)
+            .setSubtitle(subtitle)
+        if (allowed == BiometricManager.Authenticators.DEVICE_CREDENTIAL) {
+            // 用锁屏密码时不能再设「取消」按钮，否则 Builder.build() 直接抛
+            // IllegalArgumentException（系统自己提供返回键）。
+            builder.setAllowedAuthenticators(allowed)
+        } else {
+            builder.setNegativeButtonText("取消").setAllowedAuthenticators(allowed)
+        }
+        return builder.build()
     }
 
     // ---------- 验证对话框 ----------
@@ -118,25 +165,12 @@ class MainActivity : FlutterFragmentActivity() {
             result.success(false)
             return
         }
-        onCrypto = null
-        onCancel = null
-        prompt(null, BiometricPrompt.PromptInfo.Builder()
-            .setTitle(prompt)
-            .setSubtitle("用指纹或面容验证")
-            .setNegativeButtonText("取消")
-            .setAllowedAuthenticators(AUTHENTICATORS)
-            .build(), result)
+        onVerified = { pending -> pending.success(true) }
+        onCancel = { pending -> pending.success(false) }
+        show(promptInfo(prompt, "用指纹或面容验证"), result)
     }
 
-    /**
-     * 弹验证框。[cipher] 非空时包成 CryptoObject：系统验证通过后
-     * 这个 Cipher 才被解锁，[onCrypto] 里才能 doFinal。
-     */
-    private fun prompt(
-        cipher: Cipher?,
-        info: BiometricPrompt.PromptInfo,
-        result: MethodChannel.Result,
-    ) {
+    private fun show(info: BiometricPrompt.PromptInfo, result: MethodChannel.Result) {
         pendingResult = result
         val executor = ContextCompat.getMainExecutor(this)
         val callback = object : BiometricPrompt.AuthenticationCallback() {
@@ -144,36 +178,31 @@ class MainActivity : FlutterFragmentActivity() {
                 @NonNull authResult: BiometricPrompt.AuthenticationResult
             ) {
                 val pending = takePending() ?: return
-                val unlocked = authResult.cryptoObject?.cipher
-                if (cipher == null) {
-                    // 单纯的验证请求，没有要解锁的 Cipher。
+                val action = onVerified
+                onVerified = null
+                onCancel = null
+                if (action == null) {
                     pending.success(true)
-                    return
+                } else {
+                    action(pending)
                 }
-                if (unlocked == null) {
-                    pending.error("no_cipher", "验证通过但没拿到可用的密钥", null)
-                    return
-                }
-                onCrypto?.invoke(unlocked, pending) ?: pending.success(true)
             }
 
             override fun onAuthenticationError(code: Int, @NonNull msg: CharSequence) {
                 // 用户取消（13 = ERROR_USER_CANCELED，10 = ERROR_NEGATIVE_BUTTON）
                 // 也算 false，Dart 侧据此显示「已取消」而不是红字报错。
                 val pending = takePending() ?: return
-                onCancel?.invoke(pending) ?: pending.success(false)
+                val action = onCancel
+                onVerified = null
+                onCancel = null
+                action?.invoke(pending) ?: pending.success(false)
             }
 
             override fun onAuthenticationFailed() {
                 // 单次指纹不匹配：系统会让用户重试，这里不结束。
             }
         }
-        val dialog = BiometricPrompt(this, executor, callback)
-        if (cipher != null) {
-            dialog.authenticate(info, BiometricPrompt.CryptoObject(cipher))
-        } else {
-            dialog.authenticate(info)
-        }
+        BiometricPrompt(this, executor, callback).authenticate(info)
     }
 
     /** 只取一次，避免回调重复触发时把同一个 Result 应答两遍。 */
@@ -183,21 +212,17 @@ class MainActivity : FlutterFragmentActivity() {
         return pending
     }
 
-    /** CryptoObject 验证通过后的回调，拿到已解锁的 Cipher。 */
-    private var onCrypto: ((Cipher, MethodChannel.Result) -> Unit)? = null
-
-    /** 用户取消或出错时的回调。 */
-    private var onCancel: ((MethodChannel.Result) -> Unit)? = null
-
     // ---------- Keystore ----------
 
-    private fun secretKey(): SecretKey {
-        val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+    private fun keystore(): KeyStore =
+        KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
 
-        // 旧别名是错误参数生成的，留着只会让人以为凭据还在，直接删。
-        if (store.containsAlias(LEGACY_ALIAS)) {
+    private fun secretKey(): SecretKey {
+        val store = keystore()
+        for (legacy in LEGACY_ALIASES) {
+            if (!store.containsAlias(legacy)) continue
             try {
-                store.deleteEntry(LEGACY_ALIAS)
+                store.deleteEntry(legacy)
             } catch (_: Exception) {
                 // 删不掉不影响新密钥
             }
@@ -205,9 +230,9 @@ class MainActivity : FlutterFragmentActivity() {
 
         val existing = try {
             store.getEntry(KEY_ALIAS, null) as? KeyStore.SecretKeyEntry
-        } catch (_: UnrecoverableKeyException) {
-            // 密钥被系统作废了（换指纹、改锁屏密码）。留着它只会让每次
-            // 加解密都失败，删掉重新生成一把。
+        } catch (_: Exception) {
+            // 密钥被系统作废（换指纹、改锁屏密码、恢复出厂后残留的别名）。
+            // 留着只会让每次加解密都失败，删掉重新生成一把。
             try {
                 store.deleteEntry(KEY_ALIAS)
             } catch (_: Exception) {
@@ -220,148 +245,130 @@ class MainActivity : FlutterFragmentActivity() {
         val generator = KeyGenerator.getInstance(
             KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore"
         )
-        val builder = KeyGenParameterSpec.Builder(
-            KEY_ALIAS,
-            KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
-        )
-            .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-            .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-            .setKeySize(256)
-            // 换新指纹时让旧密钥失效：新录入的指纹不该能解别人的托管密钥。
-            .setInvalidatedByBiometricEnrollment(true)
-
-        // 只有在系统验证可用时才要求「每次使用都要验证」——不然在没录指纹的
-        // 设备上这把密钥根本用不了，连创建私密库都会失败。
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && biometricAvailable()) {
-            builder.setUserAuthenticationRequired(true)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                // 0 = 每次使用都要当场验证（Keystore 不留时间窗口）。
-                builder.setUserAuthenticationParameters(0, AUTHENTICATORS)
-            } else {
-                @Suppress("DEPRECATION")
-                builder.setUserAuthenticationValidityDurationSeconds(-1)
-            }
-        }
-        generator.init(builder.build())
+        val spec = KeyGenParameterSpecHolder.build(KEY_ALIAS)
+        generator.init(spec)
         return generator.generateKey()
     }
 
-    /** 密钥被新指纹作废、或设备改了锁屏密码之后，只能重新用主密码走一遍。 */
-    private fun keyBrokenMessage(e: Throwable): String? = when (e) {
-        is KeyPermanentlyInvalidatedException ->
-            "系统凭据已失效（指纹或锁屏密码有变动），请用主密码解锁"
-        is UnrecoverableKeyException ->
-            "系统凭据已失效，请用主密码解锁"
-        // 密钥重建过（上面 getEntry 失败后重新生成），旧密文自然解不开。
-        is AEADBadTagException ->
-            "系统凭据已失效，请用主密码解锁"
-        else -> null
+    /**
+     * 生成参数单独放一个对象里，纯粹是为了让上面的逻辑保持线性。
+     *
+     * 注意**不设** `setUserAuthenticationRequired`：认证交给 BiometricPrompt，
+     * 密钥只保证「绑在这台设备的 TEE 里、拷不走」。设了它，`Cipher.init`
+     * 就会在没有当场验证的情况下抛异常，那是之前一直失败的根因。
+     */
+    private object KeyGenParameterSpecHolder {
+        fun build(alias: String): android.security.keystore.KeyGenParameterSpec =
+            android.security.keystore.KeyGenParameterSpec.Builder(
+                alias,
+                KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT
+            )
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setKeySize(256)
+                // 随机 IV，由系统在 Cipher.init 时生成，一次一密。
+                .setRandomizedEncryptionRequired(true)
+                .build()
     }
+
+    /** 失败时给一句能对得上号的说明，别把异常类名藏起来。 */
+    private fun describe(e: Throwable, prefix: String): String {
+        val name = e.javaClass.simpleName
+        val detail = e.message?.trim().orEmpty()
+        return when {
+            detail.isEmpty() -> "$prefix：$name"
+            detail.startsWith(name) -> "$prefix：$detail"
+            else -> "$prefix：$name（$detail）"
+        }
+    }
+
+    // ---------- 加解密 ----------
 
     private fun protect(plainBase64: String, result: MethodChannel.Result) {
         if (!biometricAvailable()) {
-            result.error("no_biometric", "这台设备还没有录入指纹或面容", null)
+            result.error("no_biometric", "这台设备还没有录入指纹、面容或锁屏密码", null)
             return
         }
         if (pendingResult != null) {
             result.error("busy", "正在验证，请稍候", null)
             return
         }
-        val key: SecretKey
-        val cipher: Cipher
-        try {
-            key = secretKey()
-            cipher = Cipher.getInstance(TRANSFORMATION)
-            cipher.init(Cipher.ENCRYPT_MODE, key)
+        val plain = try {
+            Base64.decode(plainBase64, Base64.NO_WRAP)
         } catch (e: Exception) {
-            val message = keyBrokenMessage(e) ?: "准备加密失败：${e.message}"
-            result.error("protect_failed", message, null)
+            result.error("bad_data", "待托管的密钥不是合法的 Base64", null)
             return
         }
 
-        onCrypto = { unlocked, pending ->
+        onVerified = { pending ->
             try {
-                val iv = unlocked.iv
-                val cipherText = unlocked.doFinal(
-                    Base64.decode(plainBase64, Base64.NO_WRAP)
-                )
-                // 输出 = iv 长度(1 字节) || iv || 密文，全部再 base64 一次。
+                val cipher = Cipher.getInstance(TRANSFORMATION)
+                cipher.init(Cipher.ENCRYPT_MODE, secretKey())
+                val iv = cipher.iv
+                val cipherText = cipher.doFinal(plain)
+                // 输出 = iv 长度(1 字节) || iv || 密文，整体再 base64 一次。
                 val combined = ByteArray(1 + iv.size + cipherText.size)
                 combined[0] = iv.size.toByte()
                 iv.copyInto(combined, 1)
                 cipherText.copyInto(combined, 1 + iv.size)
                 pending.success(Base64.encodeToString(combined, Base64.NO_WRAP))
             } catch (e: Exception) {
-                pending.error("protect_failed", e.message ?: "加密失败", null)
+                pending.error("protect_failed", describe(e, "加密失败"), null)
             }
         }
         onCancel = { pending -> pending.success(null) }
-        prompt(cipher, BiometricPrompt.PromptInfo.Builder()
-            .setTitle("开启指纹解锁")
-            .setSubtitle("验证一次，之后就能用指纹打开私密库")
-            .setNegativeButtonText("取消")
-            .setAllowedAuthenticators(AUTHENTICATORS)
-            .build(), result)
+        show(promptInfo("开启指纹解锁", "验证一次，之后就能用指纹打开私密库"), result)
     }
 
     private fun unprotect(blobBase64: String, result: MethodChannel.Result) {
         if (!biometricAvailable()) {
-            result.error("no_biometric", "这台设备还没有录入指纹或面容", null)
+            result.error("no_biometric", "这台设备还没有录入指纹、面容或锁屏密码", null)
             return
         }
         if (pendingResult != null) {
             result.error("busy", "正在验证，请稍候", null)
             return
         }
-        val combined = Base64.decode(blobBase64, Base64.NO_WRAP)
+        val combined = try {
+            Base64.decode(blobBase64, Base64.NO_WRAP)
+        } catch (e: Exception) {
+            result.error("bad_data", "托管凭据不是合法的 Base64", null)
+            return
+        }
         if (combined.isEmpty()) {
             result.error("bad_data", "托管凭据是空的", null)
             return
         }
         val ivSize = combined[0].toInt()
-        if (ivSize <= 0 || 1 + ivSize > combined.size) {
+        if (ivSize <= 0 || 1 + ivSize >= combined.size) {
             result.error("bad_data", "托管凭据格式不对", null)
             return
         }
         val iv = combined.copyOfRange(1, 1 + ivSize)
         val cipherText = combined.copyOfRange(1 + ivSize, combined.size)
 
-        val key: SecretKey
-        val cipher: Cipher
-        try {
-            key = secretKey()
-            cipher = Cipher.getInstance(TRANSFORMATION)
-            cipher.init(
-                Cipher.DECRYPT_MODE,
-                key,
-                GCMParameterSpec(GCM_TAG_BITS, iv)
-            )
-        } catch (e: Exception) {
-            val message = keyBrokenMessage(e) ?: "准备解密失败：${e.message}"
-            result.error("unprotect_failed", message, null)
-            return
-        }
-
-        onCrypto = { unlocked, pending ->
+        onVerified = { pending ->
             try {
-                val plain = unlocked.doFinal(cipherText)
+                val cipher = Cipher.getInstance(TRANSFORMATION)
+                cipher.init(
+                    Cipher.DECRYPT_MODE,
+                    secretKey(),
+                    GCMParameterSpec(GCM_TAG_BITS, iv)
+                )
+                val plain = cipher.doFinal(cipherText)
                 pending.success(Base64.encodeToString(plain, Base64.NO_WRAP))
             } catch (e: AEADBadTagException) {
+                // 密钥重建过（旧别名被清掉后生成的新密钥），旧密文自然解不开。
                 pending.error(
                     "unprotect_failed",
-                    keyBrokenMessage(e) ?: "解密失败",
+                    "系统凭据已失效，请用主密码解锁",
                     null
                 )
             } catch (e: Exception) {
-                pending.error("unprotect_failed", e.message ?: "解密失败", null)
+                pending.error("unprotect_failed", describe(e, "解密失败"), null)
             }
         }
         onCancel = { pending -> pending.success(null) }
-        prompt(cipher, BiometricPrompt.PromptInfo.Builder()
-            .setTitle("解锁私密笔记库")
-            .setSubtitle("用指纹或面容验证")
-            .setNegativeButtonText("取消")
-            .setAllowedAuthenticators(AUTHENTICATORS)
-            .build(), result)
+        show(promptInfo("解锁私密笔记库", "用指纹或面容验证"), result)
     }
 }
