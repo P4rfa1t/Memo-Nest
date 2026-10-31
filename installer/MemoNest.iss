@@ -1,5 +1,5 @@
 #define MyAppName "MemoNest 备忘录"
-#define MyAppVersion "2.1.0"
+#define MyAppVersion "2.1.1"
 #define MyAppPublisher "P4rfa1t"
 #define MyAppExeName "MemoNest.exe"
 

@@ -8,7 +8,7 @@ import 'dart:io';
 import 'package:path/path.dart' as p;
 
 const String appName = 'MemoNest 备忘录';
-const String appVersion = '2.1.0';
+const String appVersion = '2.1.1';
 
 /// 由 `main()` 在 Android 等「拿不到 exe 路径」的平台上提前注入。
 Directory? _rootOverride;
