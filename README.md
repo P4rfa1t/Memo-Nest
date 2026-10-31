@@ -43,14 +43,53 @@ Graph 模式的同步逻辑与 Obsidian 的 Remotely Save 一致：本地记一�
 以及 `memo-backup-*.zip` 快照（按「云端保留备份数」清理旧的）。私密库密钥始终留在本机。
 超过 250 MB 的单个文件走 `createUploadSession` 分块上传。
 
+## GitHub 备份：双向同步，不是整包覆盖
+
+设置 → GitHub 里配好 `用户名/仓库` 与 Token 后，「备份」按钮做的是**同步**：
+先取回云端，跟本地做三方合并，再把合并结果推上去。之前那版是「本地盖掉云端」，
+手机上删掉的便签、另一台机器新写的内容，都会在下一次推送里被静默抹掉。
+
+只有「本地 vs 云端」两份状态时，没法区分两种相反的情形：云端没有这篇，
+可能是本地新写的（该上传），也可能是云端删掉的（该本地删）。所以每次同步
+成功后在 `data/github-sync.json` 留一份基准点（每篇的 `updated` / `filename`），
+下次拿它判**哪一边动过**。
+
+合并规则：
+
+- 只有一边有、且基准点里没有 → 新增，往缺的那边送。
+- 只有本地有、基准点有且本地没改过 → 云端删的，本地跟着删。
+- 只有本地有、但本地改过 → 云端删了而本地又写了新内容，保住本地、重新上传。
+- 两边都有：都没改→以本地为准；只一边改→单向推送；都改且内容不同→
+  `updated` 新的留在原文件，旧的那份另存成「（本机副本）」「（云端副本）」
+  的新便签。宁可多一篇，也不静默丢字。
+
+删除范围只有 `notes/` 与 `vault/`，仓库里的 `README.md`、`.gitignore` 一律不碰；
+`vault/` 更是**只有本地确实有私密库时**才会被清理——否则换台机器登录一次
+就把别人云端的密文全删了。
+
+首次同步没有基准点，按「取并集」处理，谁的都不丢。
+
+两种传输方式，设置里的「同步方式」可以强制指定：
+
+- **git**：调用本机 `git` 推一个工作区（`data/github`），合并仍由 Dart 侧完成。
+- **HTTP API**：直接走 GitHub 的 Git Data API（blob/tree/commit/ref），
+  不需要 `git` 可执行文件，也不需要把仓库 clone 下来。Android 上默认走这条
+  ——手机上根本没有 git。`sha` 相同的文件不会重新上传，也不会重复下载。
+
+远端 blob 的 sha 是本地按 `sha1("blob <长度>\0" + 内容)` 算出来的，
+与 `git hash-object` 逐字节一致，所以「这个文件到底变没变」不用下载就能判。
+
 ## 私密库的系统凭据解锁
 
 主密码始终是唯一的根密钥，系统验证只是让日常解锁少打几次字：
 
 1. 第一次用主密码解锁（或创建）之后，库密钥会被平台密钥库加密存到
    `data/vault/hello.bin`。Windows 用 DPAPI（`CryptProtectData`，绑当前账户），
-   Android 用 Keystore 里的 AES 密钥（明文不出 TEE）。拷走文件、换个账户、
-   换台机器都解不开。
+   Android 用 Keystore 里的设备绑定 AES-256-GCM 密钥（明文不出 TEE）。拷走文件、
+   换个账户、换台机器都解不开。两边的验证都不绑在密钥上：Windows 是
+   `UserConsentVerifier` 通过后解 DPAPI，Android 是 `BiometricPrompt` 通过后
+   用 Keystore 解密。绑定方式的代价是「换指纹就让密钥作废」，而作废之后
+   连主密码兜底的路都会更难走，所以宁可让验证站在密钥前面。
 2. 之后再打开「私密」，面板上多一个「用 Windows Hello 解锁」/「用指纹 · 面容解锁」
    按钮，验证通过（Windows 走 `UserConsentVerifier`，Android 走 `BiometricPrompt`）
    就把库密钥取回来。
@@ -177,6 +216,21 @@ flutter build apk --release
 `memonest/hello` 通道：`BiometricPrompt` 做验证，Keystore 里的 AES-GCM
 密钥加密库密钥，明文不出 TEE。
 
+**发布签名随仓库走**（`android/key.properties` + `android/app/memonest-release.jks`）。
+一开始 release 沿用 debug 签名，结果每台机器、每次 CI 构建出来的钥匙都不同，
+手机上覆盖安装直接 `INSTALL_FAILED_UPDATE_INCOMPATIBLE`（界面只说「应用未安装」）。
+这是个个人离线工具，签名只用来保证「同一个应用身份」，所以这两份文件故意提交，
+`.gitignore` 里也用 `!` 放行。要换成自己的：
+
+```bash
+keytool -genkeypair -v -keystore android/app/memonest-release.jks \
+  -alias memonest -keyalg RSA -keysize 2048 -validity 10950 \
+  -storetype PKCS12 -storepass <口令> -dname "CN=..., O=..., C=CN"
+```
+
+改完记得同步 `android/key.properties`。另外覆盖安装要求 `versionCode` 不降，
+发版时把 `pubspec.yaml` 里的 `version: x.y.z+N` 的 `N` 递增。
+
 Android 上没有「数据目录」可打开，「⋯ → 打开数据文件夹」会退化成把路径
 显示在右下角浮层里让你复制。
 
@@ -199,6 +253,8 @@ lib/
 test/core_test.dart      18 项单元测试（模型、库、加密、备份）
 test/onedrive_test.dart  20 项 Graph 客户端测试，打本地假服务器
 test/import_md_test.dart 5 项导入 Markdown
+test/github_api_test.dart 9 项 GitHub HTTP API 与同步提交
+test/github_sync_test.dart 8 项三方合并规则（新增/删除/冲突/私密库保护）
 test/vault_lock_test.dart / vault_panel_hello_test.dart
                          7 项私密库上锁与系统凭据按钮
 test/toast_test.dart     8 项浮层与系统凭据分支
