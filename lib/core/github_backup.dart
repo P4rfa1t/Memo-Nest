@@ -11,6 +11,7 @@ import 'dart:io';
 
 import 'package:path/path.dart' as p;
 
+import 'github_api.dart';
 import 'paths.dart';
 
 class GitHubError implements Exception {
@@ -31,6 +32,15 @@ class GitHubService {
   /// 整个过程都是异步子进程：git push 是网络往返，同步跑会把 UI isolate
   /// 卡死几秒，界面直接「无响应」。
   Future<String> push() async {
+    // Android 上永远没有 git 可执行文件，HTTP API 是唯一可行路径；
+    // engine 显式设成 git/api 时可以强制指定，排查哪条路出问题用。
+    final engine = '${config.get('github.engine', 'auto')}'.trim();
+    final useApi = engine == 'api' || (engine != 'git' && Platform.isAndroid);
+    if (useApi) {
+      // 两条路产出的仓库内容一致（notes/*.md + vault/*），可以随时切换。
+      return GitHubApi(paths).push(config);
+    }
+
     final git = await _which('git');
     if (git == null) {
       throw GitHubError('未检测到 Git，请先安装 https://git-scm.com/download/win');
@@ -81,8 +91,8 @@ class GitHubService {
     }
 
     await _git(git, ['add', '-A'], workDir);
-    final staged = await _git(git, ['diff', '--cached', '--quiet'], workDir,
-        check: false);
+    final staged =
+        await _git(git, ['diff', '--cached', '--quiet'], workDir, check: false);
     var committed = false;
     if (staged.exitCode != 0) {
       final now = DateTime.now();
@@ -93,8 +103,8 @@ class GitHubService {
       committed = true;
     }
 
-    var push =
-        await _git(git, ['push', url, 'HEAD:$useBranch'], workDir, check: false);
+    var push = await _git(git, ['push', url, 'HEAD:$useBranch'], workDir,
+        check: false);
     if (push.exitCode != 0) {
       final output = '${push.stderr}\n${push.stdout}'.toLowerCase();
       if (output.contains('rejected') ||
@@ -113,8 +123,8 @@ class GitHubService {
             ],
             workDir,
             check: false);
-        push =
-            await _git(git, ['push', url, 'HEAD:$useBranch'], workDir, check: false);
+        push = await _git(git, ['push', url, 'HEAD:$useBranch'], workDir,
+            check: false);
       }
       if (push.exitCode != 0) {
         final raw = '${push.stderr}'.trim().isEmpty

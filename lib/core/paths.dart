@@ -102,6 +102,9 @@ Map<String, dynamic> defaultConfig() => {
         'remote_url': '',
         'author_name': 'MemoNest',
         'author_email': 'memonest@localhost',
+        // auto: 有 git 就用 git，Android 上自动改用 HTTP API；
+        // git / api 可以强制指定，方便排查到底是哪条路出问题。
+        'engine': 'auto',
       },
       'general': {
         'autostart': false,

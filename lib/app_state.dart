@@ -12,6 +12,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 
 import '../core/backup.dart';
+import '../core/github_api.dart';
 import '../core/github_backup.dart';
 import '../core/models.dart';
 import '../core/note_store.dart';
@@ -535,6 +536,8 @@ class AppState extends ChangeNotifier {
       try {
         steps.add('GitHub ${await github.push()}');
       } on GitHubError catch (e) {
+        steps.add('GitHub 失败：${e.message}');
+      } on GitApiError catch (e) {
         steps.add('GitHub 失败：${e.message}');
       }
     }

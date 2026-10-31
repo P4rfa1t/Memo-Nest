@@ -12,6 +12,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../app_state.dart';
 import '../../core/hello.dart';
 import '../../core/backup.dart';
+import '../../core/github_api.dart';
 import '../../core/onedrive.dart';
 import '../../platform/host.dart';
 import '../theme.dart';
@@ -274,6 +275,7 @@ class _VaultTabState extends State<_VaultTab> {
   final _next = TextEditingController();
   final _repeat = TextEditingController();
   String _message = '';
+
   /// 系统凭据（Windows Hello / Android 生物识别）是否可用。
   bool _deviceOk = false;
   bool _fingerprintPending = true;
@@ -342,8 +344,8 @@ class _VaultTabState extends State<_VaultTab> {
                   ? (value) async {
                       await state.hello.setEnabled(value);
                       if (!mounted) return;
-                      setState(() => _message =
-                          value ? '已开启，下次先用主密码解锁一次' : '已关闭并删除托管凭据');
+                      setState(() =>
+                          _message = value ? '已开启，下次先用主密码解锁一次' : '已关闭并删除托管凭据');
                     }
                   : null,
             ),
@@ -1060,6 +1062,10 @@ class _GitHubTabState extends State<_GitHubTab> {
   late final TextEditingController _repo;
   late final TextEditingController _token;
 
+  /// 正在测试连接（HTTP API 会真的发一次请求）。
+  bool _checking = false;
+  String _note = '';
+
   AppState get state => widget.state;
 
   @override
@@ -1085,9 +1091,30 @@ class _GitHubTabState extends State<_GitHubTab> {
   @override
   Widget build(BuildContext context) {
     final enabled = state.config.get('github.enabled', false) == true;
+    final engine = _engine;
     return ListView(
       padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
       children: [
+        const Text(
+          '同步方式',
+          style: TextStyle(
+              fontSize: 12.5, fontWeight: FontWeight.w600, color: Palette.fg),
+        ),
+        const SizedBox(height: 6),
+        Row(
+          children: [
+            _engineChip('auto', '自动', '有 git 用 git'),
+            const SizedBox(width: 8),
+            _engineChip('api', 'HTTP API', '不需要 git'),
+          ],
+        ),
+        const SizedBox(height: 10),
+        Text(
+          _engineHint(engine),
+          style:
+              const TextStyle(fontSize: 11, color: Palette.muted, height: 1.6),
+        ),
+        const SizedBox(height: 14),
         _Row(
           label: '启用 GitHub 备份',
           hint: '把笔记推送到一个私有仓库，多设备同步。',
@@ -1158,8 +1185,119 @@ class _GitHubTabState extends State<_GitHubTab> {
           '令牌保存在本地 config.json，不会上传到任何地方。',
           style: TextStyle(fontSize: 11, color: Palette.muted, height: 1.6),
         ),
+        const SizedBox(height: 10),
+        Row(
+          children: [
+            _actionButton(
+                _checking ? '测试中…' : '测试连接', _checking ? () {} : _test),
+            if (_checking) ...[
+              const SizedBox(width: 8),
+              const SizedBox(
+                width: 12,
+                height: 12,
+                child: CircularProgressIndicator(
+                    strokeWidth: 1.6, color: Palette.muted),
+              ),
+            ],
+          ],
+        ),
+        if (_note.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          Text(
+            _note,
+            style:
+                const TextStyle(fontSize: 11, color: Palette.link, height: 1.6),
+          ),
+        ],
       ],
     );
+  }
+
+  /// 当前 GitHub 同步方式。`auto` 在 Android 上会自动落到 HTTP API。
+  String get _engine {
+    final raw = '${state.config.get('github.engine', 'auto')}'.trim();
+    return raw == 'api' ? 'api' : (raw == 'git' ? 'git' : 'auto');
+  }
+
+  String _engineHint(String engine) {
+    if (engine == 'api') {
+      return '直接用 GitHub 的 HTTP 接口提交，不需要安装 git。'
+          '手机、平板、精简 Linux 上只有这条路能走。';
+    }
+    if (engine == 'git') {
+      return '强制用本地 git 推送。没有装 git 时会直接报错。';
+    }
+    if (Platform.isAndroid) {
+      return '这台设备上会自动使用 HTTP API（Android 没有 git 可执行文件）。';
+    }
+    return '有 git 就用本地 git 推送，没有则改用 HTTP API。';
+  }
+
+  Widget _engineChip(String mode, String label, String hint) {
+    final active = _engine == mode;
+    return Expanded(
+      child: GestureDetector(
+        onTap: () {
+          state.config.set('github.engine', mode);
+          state.config.save();
+          setState(() => _note = '');
+        },
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 110),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          decoration: BoxDecoration(
+            color: active ? const Color(0xFFE7CF87) : Palette.strip,
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(
+              color: active ? const Color(0xFFC9A94A) : const Color(0xFFDCC888),
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 11.5,
+                  fontWeight: active ? FontWeight.w700 : FontWeight.w500,
+                  color: Palette.fg,
+                ),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                hint,
+                style: const TextStyle(
+                    fontSize: 10, color: Palette.muted, height: 1.4),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 真的打一次 API，确认 token 与仓库名对得上。
+  Future<void> _test() async {
+    state.config.set('github.repo', _repo.text.trim());
+    state.config.set('github.token', _token.text.trim());
+    state.config.save();
+    setState(() {
+      _checking = true;
+      _note = '';
+    });
+    try {
+      final detail = await GitHubApi(state.paths).verify(state.config);
+      if (!mounted) return;
+      setState(() => _note = detail);
+    } on GitApiError catch (e) {
+      if (!mounted) return;
+      setState(() => _note = '连接失败：${e.message}');
+    } on FileSystemException catch (e) {
+      if (!mounted) return;
+      setState(() => _note = '连接失败：${e.message}');
+    } finally {
+      if (mounted) setState(() => _checking = false);
+    }
   }
 }
 
