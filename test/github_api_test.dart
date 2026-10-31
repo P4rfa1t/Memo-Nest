@@ -406,6 +406,78 @@ void main() {
     );
   });
 
+  test('空仓库先靠 Contents API 建出第一个提交', () async {
+    // GitHub 对「一个提交都没有」的仓库会拒绝整个 Git Data API：
+    // 头一次建 blob 就 409 `Git Repository is empty.`。真实仓库上必现，
+    // 假服务器照抄这个行为，否则回归测试根本发现不了。
+    var bootstrapped = false;
+    var blobs = 0;
+    github.handler = (request) async {
+      final path = request.path;
+      if (path.endsWith('/git/ref/heads/main')) {
+        if (!bootstrapped) {
+          return (409, json.encode({'message': 'Git Repository is empty.'}));
+        }
+        return (200, json.encode({'object': {'sha': 'c1'}}));
+      }
+      if (request.method == 'PUT' && path.contains('/contents/')) {
+        bootstrapped = true;
+        return (201, json.encode({'content': {'sha': 'seeded'}}));
+      }
+      if (path.contains('/git/commits/c1')) {
+        return (200, json.encode({'tree': {'sha': 't0'}}));
+      }
+      if (path.contains('/git/trees/t0')) {
+        return (200, json.encode({'tree': <Map<String, dynamic>>[]}));
+      }
+      if (request.method == 'POST' && path.endsWith('/git/blobs')) {
+        if (!bootstrapped) {
+          return (409, json.encode({'message': 'Git Repository is empty.'}));
+        }
+        blobs++;
+        return (201, json.encode({'sha': 'blob-$blobs'}));
+      }
+      if (request.method == 'POST' && path.endsWith('/git/trees')) {
+        return (201, json.encode({'sha': 't1'}));
+      }
+      if (request.method == 'POST' && path.endsWith('/git/commits')) {
+        return (201, json.encode({'sha': 'c2'}));
+      }
+      // 空仓库靠 Contents API 落下第一个提交之后，分支已经存在，
+      // 后续提交走 PATCH；两种都要接住。
+      if (path.contains('/git/refs')) {
+        return (201, json.encode({'ref': 'refs/heads/main'}));
+      }
+      return (404, json.encode({'message': 'Not Found'}));
+    };
+
+    writeNote(paths, 'a.md', '# A\n');
+
+    final result = await api().push(config);
+    expect(result, contains('已同步 someone/notes'));
+
+    final puts = github.requests.where((r) => r.method == 'PUT').toList();
+    expect(puts, hasLength(1), reason: '空仓库只该初始化一次');
+    expect(puts.first.path, contains('/contents/'));
+    expect(
+      github.requests.where((r) => r.path.contains('/git/refs/heads/main')),
+      hasLength(1),
+      reason: '初始化之后应该走正常流程把分支指到新提交',
+    );
+    expect(blobs, greaterThan(0));
+  });
+
+  test('云端真撞车时报错，不会当成空仓库反复初始化', () async {
+    github.handler = (request) async =>
+        (409, json.encode({'message': 'Update is not a fast forward'}));
+    await expectLater(
+      api().push(config),
+      throwsA(isA<GitApiError>()
+          .having((e) => e.message, 'message', contains('请重试'))),
+    );
+    expect(github.requests.where((r) => r.method == 'PUT'), isEmpty);
+  });
+
   test('verify 报告仓库名与可见性', () async {
     github.handler = (request) async {
       if (request.path == '/repos/someone/notes') {

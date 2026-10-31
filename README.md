@@ -69,6 +69,10 @@ Graph 模式的同步逻辑与 Obsidian 的 Remotely Save 一致：本地记一�
 
 首次同步没有基准点，按「取并集」处理，谁的都不丢。
 
+仓库要是**一个提交都没有**，GitHub 会拒绝整个 Git Data API（建 blob 直接
+409 `Git Repository is empty.`），所以第一次会先用 Contents API 落一个种子
+文件建出初始提交，再跑正常流程。这一步只发生一次。
+
 两种传输方式，设置里的「同步方式」可以强制指定：
 
 - **git**：调用本机 `git` 推一个工作区（`data/github`），合并仍由 Dart 侧完成。

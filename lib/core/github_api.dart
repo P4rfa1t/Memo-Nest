@@ -30,7 +30,14 @@ import 'paths.dart';
 /// GitHub 侧的失败。文案可以直接显示给用户。
 class GitApiError implements Exception {
   final String message;
-  GitApiError(this.message);
+
+  /// HTTP 状态码，0 表示不是 HTTP 层错误（本地校验、解析失败等）。
+  ///
+  /// 光看 [message] 判错迟早出事：空仓库的 409 文案里带 "empty"，
+  /// 「分支不存在」是新仓库的 404，两者都要当成「还没有云端提交」。
+  final int status;
+
+  GitApiError(this.message, {this.status = 0});
   @override
   String toString() => message;
 }
@@ -151,22 +158,28 @@ class GitHubApi {
   }
 
   /// 双向同步：取回云端 → 三方合并 → 提交合并结果。返回一行可读结果。
-  Future<String> sync(Config config) async {
+  ///
+  /// [allowBootstrap] 只给内部重试用：空仓库先靠 Contents API 落下第一个
+  /// 提交，再回来跑一遍正常流程。
+  Future<String> sync(Config config, {bool allowBootstrap = true}) async {
     final repo = _repoOf(config);
     final token = _tokenOf(config);
     final branch = _branchOf(config);
     final client = HttpClient()
       ..connectionTimeout = const Duration(seconds: 20);
 
+    // 写在 try 外面：空仓库要拿它当第一个提交的内容。
+    final files = <CommitFile>[];
+
     try {
       final sync = _sync;
       final plan = await pullMerge(config);
 
       // 合并之后磁盘就是最终状态，直接按它建树。
-      final files = [
+      files.addAll([
         for (final entry in plan.files.entries)
           CommitFile(entry.key, entry.value),
-      ];
+      ]);
 
       String? parentSha;
       var treeSha = '';
@@ -177,8 +190,8 @@ class GitHubApi {
             client, 'GET', '$_endpoint/repos/$repo/git/ref/heads/$branch',
             token: token);
       } on GitApiError catch (e) {
-        // 404 说明分支还没建，首次提交；其余错误照抛。
-        if (!e.message.contains('404')) rethrow;
+        // 分支还没建，这是首次提交；其余错误照抛。
+        if (!_noRemoteBranch(e)) rethrow;
         head = null;
       }
       if (head is Map) {
@@ -291,6 +304,12 @@ class GitHubApi {
         if (unchanged > 0 && created.isNotEmpty) '未变 $unchanged 个',
       ].join('；');
       return detail;
+    } on GitApiError catch (e) {
+      if (allowBootstrap && files.isNotEmpty && _isEmptyRepo(e)) {
+        await _bootstrap(repo, token, branch, files.first);
+        return sync(config, allowBootstrap: false);
+      }
+      rethrow;
     } on SocketException catch (e) {
       throw GitApiError('网络连接失败：${e.message}');
     } on HandshakeException catch (e) {
@@ -306,6 +325,44 @@ class GitHubApi {
 
   /// 保留旧名字：外部只关心「跑一次同步」。
   Future<String> push(Config config) => sync(config);
+
+  /// 仓库一个提交都没有。
+  bool _isEmptyRepo(GitApiError e) =>
+      e.status == 409 &&
+      (e.message.contains('还没有') || e.message.contains('empty'));
+
+  /// 给空仓库落下第一个提交。
+  ///
+  /// GitHub 对「一个提交都没有」的仓库会拒绝整个 Git Data API——建 blob
+  /// 直接 409 `Git Repository is empty.`，所以不能先建树再建提交。只有
+  /// Contents API 能从零建出第一个提交。代价是首个文件单独提交一次，
+  /// 紧接着的正常流程会把这棵树的其余部分补上。
+  Future<void> _bootstrap(
+    String repo,
+    String token,
+    String branch,
+    CommitFile seed,
+  ) async {
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 20);
+    try {
+      await _send(
+        client,
+        'PUT',
+        // 路径里可能有中文（便签文件名就是标题），逐段转义再拼。
+        '$_endpoint/repos/$repo/contents/'
+        '${seed.path.split('/').map(Uri.encodeComponent).join('/')}',
+        token: token,
+        body: {
+          'message': '备忘录同步：初始化仓库',
+          'content': base64.encode(seed.bytes),
+          'branch': branch,
+        },
+      );
+    } finally {
+      client.close(force: true);
+    }
+  }
 
   /// token 是否有效、目标仓库是否存在。设置页用来做「测试连接」。
   Future<String> verify(Config config) async {
@@ -348,7 +405,7 @@ class GitHubApi {
           client, 'GET', '$_endpoint/repos/$repo/git/ref/heads/$branch',
           token: token);
     } on GitApiError catch (e) {
-      if (!e.message.contains('404')) rethrow;
+      if (!_noRemoteBranch(e)) rethrow;
       return result;
     }
     if (head is! Map) return result;
@@ -463,12 +520,22 @@ class GitHubApi {
       if (text.trim().isEmpty) return null;
       return json.decode(text);
     }
-    throw GitApiError(_errorText(text, response.statusCode));
+    throw GitApiError(_errorText(text, response.statusCode),
+        status: response.statusCode);
   }
+
+  /// 「云端还没有这个分支」。
+  ///
+  /// 新建的空仓库去查 `git/ref/heads/main` 返回的不是 404，而是
+  /// `409 {"message":"Git Repository is empty."}`——老代码只认 404，
+  /// 于是第一次推送就报「云端有更新的提交，请重试」，功能等于不可用。
+  bool _noRemoteBranch(GitApiError e) =>
+      e.status == 404 || e.message.contains('404') || _isEmptyRepo(e);
 
   String _errorText(String raw, int status) {
     if (status == 401) return 'Token 无效或已过期（401）';
     if (status == 404) return '仓库不存在或 Token 没有权限（404）';
+    if (status == 409 && raw.contains('empty')) return '云端仓库还没有任何提交';
     if (status == 409 || status == 422) return '云端有更新的提交，请重试（$status）';
     try {
       final decoded = json.decode(raw);
