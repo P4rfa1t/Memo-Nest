@@ -16,18 +16,32 @@ final class _DataBlob extends Struct {
 }
 
 typedef _CryptProtectDataNative = Int32 Function(
-    Pointer<_DataBlob>, Pointer<Utf16>, Pointer<_DataBlob>, Pointer<Void>,
-    Pointer<Void>, Uint32, Pointer<_DataBlob>);
-typedef _CryptProtectDataDart = int Function(
-    Pointer<_DataBlob>, Pointer<Utf16>, Pointer<_DataBlob>, Pointer<Void>,
-    Pointer<Void>, int, Pointer<_DataBlob>);
+    Pointer<_DataBlob>,
+    Pointer<Utf16>,
+    Pointer<_DataBlob>,
+    Pointer<Void>,
+    Pointer<Void>,
+    Uint32,
+    Pointer<_DataBlob>);
+typedef _CryptProtectDataDart = int Function(Pointer<_DataBlob>, Pointer<Utf16>,
+    Pointer<_DataBlob>, Pointer<Void>, Pointer<Void>, int, Pointer<_DataBlob>);
 
 typedef _CryptUnprotectDataNative = Int32 Function(
-    Pointer<_DataBlob>, Pointer<Pointer<Utf16>>, Pointer<_DataBlob>,
-    Pointer<Void>, Pointer<Void>, Uint32, Pointer<_DataBlob>);
+    Pointer<_DataBlob>,
+    Pointer<Pointer<Utf16>>,
+    Pointer<_DataBlob>,
+    Pointer<Void>,
+    Pointer<Void>,
+    Uint32,
+    Pointer<_DataBlob>);
 typedef _CryptUnprotectDataDart = int Function(
-    Pointer<_DataBlob>, Pointer<Pointer<Utf16>>, Pointer<_DataBlob>,
-    Pointer<Void>, Pointer<Void>, int, Pointer<_DataBlob>);
+    Pointer<_DataBlob>,
+    Pointer<Pointer<Utf16>>,
+    Pointer<_DataBlob>,
+    Pointer<Void>,
+    Pointer<Void>,
+    int,
+    Pointer<_DataBlob>);
 
 typedef _LocalFreeNative = Pointer<Void> Function(Pointer<Void>);
 typedef _LocalFreeDart = Pointer<Void> Function(Pointer<Void>);
@@ -35,7 +49,8 @@ typedef _LocalFreeDart = Pointer<Void> Function(Pointer<Void>);
 const int _cryptprotectUiForbidden = 0x1;
 
 DynamicLibrary? _crypt32Cache;
-DynamicLibrary get _crypt32 => _crypt32Cache ??= DynamicLibrary.open('crypt32.dll');
+DynamicLibrary get _crypt32 =>
+    _crypt32Cache ??= DynamicLibrary.open('crypt32.dll');
 
 DynamicLibrary? _kernel32Cache;
 DynamicLibrary get _kernel32 =>
@@ -50,8 +65,7 @@ class DpapiError implements Exception {
 }
 
 /// 用当前 Windows 账户的 DPAPI 密钥加密 [plain]。
-Uint8List dpapiProtect(Uint8List plain,
-    {String description = 'MemoNest 私密库'}) {
+Uint8List dpapiProtect(Uint8List plain, {String description = 'MemoNest 私密库'}) {
   final protect =
       _crypt32.lookupFunction<_CryptProtectDataNative, _CryptProtectDataDart>(
           'CryptProtectData');
@@ -68,8 +82,8 @@ Uint8List dpapiProtect(Uint8List plain,
     }
     input.ref.cbData = plain.length;
     input.ref.pbData = buffer;
-    final ok = protect(
-        input, desc, nullptr, nullptr, nullptr, _cryptprotectUiForbidden, output);
+    final ok = protect(input, desc, nullptr, nullptr, nullptr,
+        _cryptprotectUiForbidden, output);
     if (ok == 0) {
       throw DpapiError('保存凭据失败：系统拒绝了 DPAPI 加密');
     }
@@ -87,9 +101,8 @@ Uint8List dpapiProtect(Uint8List plain,
 
 /// 用当前 Windows 账户的 DPAPI 密钥解密 [blob]。
 Uint8List dpapiUnprotect(Uint8List blob) {
-  final unprotect = _crypt32
-      .lookupFunction<_CryptUnprotectDataNative, _CryptUnprotectDataDart>(
-          'CryptUnprotectData');
+  final unprotect = _crypt32.lookupFunction<_CryptUnprotectDataNative,
+      _CryptUnprotectDataDart>('CryptUnprotectData');
   final localFree =
       _kernel32.lookupFunction<_LocalFreeNative, _LocalFreeDart>('LocalFree');
 

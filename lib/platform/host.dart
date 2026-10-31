@@ -8,7 +8,6 @@
 /// 上层只依赖这里暴露的接口，具体实现在 `host_io.dart`。
 library;
 
-
 import 'package:flutter/foundation.dart';
 
 /// 剪贴板里的位图。`pixels` 是自上而下的 BGR/BGRX 行数据。

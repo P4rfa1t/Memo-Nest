@@ -78,12 +78,10 @@ class PlainHost implements Host {
   @override
   bool autostartEnabled() => false;
   @override
-  void setAutostart(bool enabled) =>
-      throw HostError('当前平台不支持开机自启');
+  void setAutostart(bool enabled) => throw HostError('当前平台不支持开机自启');
 
   @override
-  String createDesktopShortcut() =>
-      throw HostError('当前平台不支持创建桌面快捷方式');
+  String createDesktopShortcut() => throw HostError('当前平台不支持创建桌面快捷方式');
 
   @override
   @override
@@ -109,8 +107,7 @@ class PlainHost implements Host {
   @override
   Future<bool> deviceAuthAvailable() async => false;
   @override
-  Future<bool> deviceAuthVerify({String prompt = '解锁私密笔记库'}) async =>
-      false;
+  Future<bool> deviceAuthVerify({String prompt = '解锁私密笔记库'}) async => false;
   @override
   Future<Uint8List> protectSecret(Uint8List plain,
           {String description = 'MemoNest 私密库'}) async =>
@@ -383,7 +380,8 @@ class LinuxHost extends PlainHost with _DesktopWindow {
   }
 
   /// `~/.config/autostart/memonest.desktop`
-  String get _autostartPath => p.join(_configHome, 'autostart', 'memonest.desktop');
+  String get _autostartPath =>
+      p.join(_configHome, 'autostart', 'memonest.desktop');
 
   String get _execLine => Platform.resolvedExecutable;
 

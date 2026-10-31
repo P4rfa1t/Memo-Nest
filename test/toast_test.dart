@@ -130,8 +130,7 @@ void main() {
       await state.runBackup();
       expect(state.toasts, isNotEmpty);
       final toast = state.toasts.last;
-      expect(toast.text.contains('；'), isFalse,
-          reason: '多步结果应该换行，不该用分号拼成一行');
+      expect(toast.text.contains('；'), isFalse, reason: '多步结果应该换行，不该用分号拼成一行');
       expect(toast.kind, isNot(ToastKind.error));
     });
   });
@@ -155,8 +154,7 @@ void main() {
 
       expect(key, isNotEmpty);
       expect(host.unprotectCalls, 1);
-      expect(host.verifyCalls, 0,
-          reason: 'Android 上解密自带验证框，再弹一次会连出两个对话框');
+      expect(host.verifyCalls, 0, reason: 'Android 上解密自带验证框，再弹一次会连出两个对话框');
     });
 
     test('Windows 那种「DPAPI 不带验证」的平台，先弹验证再解密', () async {

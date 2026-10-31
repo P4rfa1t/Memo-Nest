@@ -99,118 +99,118 @@ class _MainWindowState extends State<MainWindow> {
     // 否则窗口投影会在四角露出一圈方形毛边。Android 上窗口铺满屏幕，
     // 剪圆角反而会在四角露出透明黑边，所以只在桌面做。
     final shell = CallbackShortcuts(
-        bindings: <ShortcutActivator, VoidCallback>{
-          const SingleActivator(LogicalKeyboardKey.keyF, control: true):
-              _toggleSearch,
-          const SingleActivator(LogicalKeyboardKey.keyE, control: true): () {
-            state.previewMode = !state.previewMode;
-            state.refresh();
-          },
-          const SingleActivator(LogicalKeyboardKey.keyN, control: true): () =>
-              state.newNote(),
-          const SingleActivator(LogicalKeyboardKey.keyS, control: true): () {
-            state.saveCurrent(force: true);
-          },
-          const SingleActivator(LogicalKeyboardKey.keyD, control: true): () {
-            if (!_anyOverlay) _confirmDelete();
-          },
-          const SingleActivator(LogicalKeyboardKey.keyL, control: true): () {
-            if (state.isVault) state.lockVault();
-          },
-          const SingleActivator(LogicalKeyboardKey.comma, control: true): () {
-            setState(() => _settingsOpen = true);
-          },
-          const SingleActivator(LogicalKeyboardKey.f5): () => state.runBackup(),
-          const SingleActivator(LogicalKeyboardKey.escape): () {
-            if (_anyOverlay) {
-              _closeOverlays();
-              state.vaultPanelOpen = false;
-              state.refresh();
-            } else if (_searchOpen) {
-              _toggleSearch();
-            }
-          },
+      bindings: <ShortcutActivator, VoidCallback>{
+        const SingleActivator(LogicalKeyboardKey.keyF, control: true):
+            _toggleSearch,
+        const SingleActivator(LogicalKeyboardKey.keyE, control: true): () {
+          state.previewMode = !state.previewMode;
+          state.refresh();
         },
-        child: Focus(
-          autofocus: true,
-          child: Scaffold(
-            backgroundColor: Palette.bg,
-            body: Stack(
-              children: [
-                SafeArea(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      _buildTitleBar(),
-                      _buildHeader(),
-                      _buildSelector(),
-                      if (_searchOpen) _buildSearchRow(),
-                      Expanded(child: _buildBody()),
-                      _buildStatusBar(),
-                    ],
+        const SingleActivator(LogicalKeyboardKey.keyN, control: true): () =>
+            state.newNote(),
+        const SingleActivator(LogicalKeyboardKey.keyS, control: true): () {
+          state.saveCurrent(force: true);
+        },
+        const SingleActivator(LogicalKeyboardKey.keyD, control: true): () {
+          if (!_anyOverlay) _confirmDelete();
+        },
+        const SingleActivator(LogicalKeyboardKey.keyL, control: true): () {
+          if (state.isVault) state.lockVault();
+        },
+        const SingleActivator(LogicalKeyboardKey.comma, control: true): () {
+          setState(() => _settingsOpen = true);
+        },
+        const SingleActivator(LogicalKeyboardKey.f5): () => state.runBackup(),
+        const SingleActivator(LogicalKeyboardKey.escape): () {
+          if (_anyOverlay) {
+            _closeOverlays();
+            state.vaultPanelOpen = false;
+            state.refresh();
+          } else if (_searchOpen) {
+            _toggleSearch();
+          }
+        },
+      },
+      child: Focus(
+        autofocus: true,
+        child: Scaffold(
+          backgroundColor: Palette.bg,
+          body: Stack(
+            children: [
+              SafeArea(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    _buildTitleBar(),
+                    _buildHeader(),
+                    _buildSelector(),
+                    if (_searchOpen) _buildSearchRow(),
+                    Expanded(child: _buildBody()),
+                    _buildStatusBar(),
+                  ],
+                ),
+              ),
+              if (state.vaultPanelOpen)
+                // 面板铺满整个窗口，遮住标题栏——自绘标题栏之后窗口只剩
+                // 一圈系统边框，最大化/还原在别处也能做，不必和面板抢位置。
+                Positioned.fill(
+                  child: SafeArea(
+                    child: VaultPanel(
+                      state: state,
+                      onClose: () {
+                        state.vaultPanelOpen = false;
+                        state.vaultPanelMode = VaultPanelMode.none;
+                        state.refresh();
+                      },
+                    ),
                   ),
                 ),
-                if (state.vaultPanelOpen)
-                  // 面板铺满整个窗口，遮住标题栏——自绘标题栏之后窗口只剩
-                  // 一圈系统边框，最大化/还原在别处也能做，不必和面板抢位置。
-                  Positioned.fill(
-                    child: SafeArea(
-                      child: VaultPanel(
-                        state: state,
-                        onClose: () {
-                          state.vaultPanelOpen = false;
-                          state.vaultPanelMode = VaultPanelMode.none;
-                          state.refresh();
-                        },
-                      ),
-                    ),
-                  ),
-                if (_settingsOpen)
-                  Positioned.fill(
-                    child: SafeArea(
-                      child: SettingsPanel(
-                        state: state,
-                        onClose: () => setState(() => _settingsOpen = false),
-                      ),
-                    ),
-                  ),
-                if (_trashOpen)
-                  Positioned.fill(
-                    child: SafeArea(
-                      child: TrashPanel(
-                        state: state,
-                        onClose: () => setState(() => _trashOpen = false),
-                      ),
-                    ),
-                  ),
-                if (_menuOpen)
-                  Positioned.fill(
-                    child: MenuOverlay(
+              if (_settingsOpen)
+                Positioned.fill(
+                  child: SafeArea(
+                    child: SettingsPanel(
                       state: state,
-                      onClose: () => setState(() => _menuOpen = false),
-                      onOpenSettings: () => setState(() {
-                        _menuOpen = false;
-                        _settingsOpen = true;
-                      }),
-                      onOpenTrash: () => setState(() {
-                        _menuOpen = false;
-                        _trashOpen = true;
-                      }),
-                      onImport: _importNotes,
-                      onExport: _exportNote,
-                      onOpenDataDir: _openDataDir,
-                      onShowHelp: _showHelp,
-                      onShowAbout: _showAbout,
-                      onQuit: _quit,
-                      onDelete: _confirmDelete,
+                      onClose: () => setState(() => _settingsOpen = false),
                     ),
                   ),
-                // 提示浮层放最上层：备份、导入的结果要比面板更显眼。
-                ToastOverlay(state: state),
-              ],
-            ),
+                ),
+              if (_trashOpen)
+                Positioned.fill(
+                  child: SafeArea(
+                    child: TrashPanel(
+                      state: state,
+                      onClose: () => setState(() => _trashOpen = false),
+                    ),
+                  ),
+                ),
+              if (_menuOpen)
+                Positioned.fill(
+                  child: MenuOverlay(
+                    state: state,
+                    onClose: () => setState(() => _menuOpen = false),
+                    onOpenSettings: () => setState(() {
+                      _menuOpen = false;
+                      _settingsOpen = true;
+                    }),
+                    onOpenTrash: () => setState(() {
+                      _menuOpen = false;
+                      _trashOpen = true;
+                    }),
+                    onImport: _importNotes,
+                    onExport: _exportNote,
+                    onOpenDataDir: _openDataDir,
+                    onShowHelp: _showHelp,
+                    onShowAbout: _showAbout,
+                    onQuit: _quit,
+                    onDelete: _confirmDelete,
+                  ),
+                ),
+              // 提示浮层放最上层：备份、导入的结果要比面板更显眼。
+              ToastOverlay(state: state),
+            ],
           ),
         ),
+      ),
     );
 
     if (!state.host.isDesktop) return shell;
@@ -234,8 +234,7 @@ class _MainWindowState extends State<MainWindow> {
     }
     final files = await openFiles(
       acceptedTypeGroups: const [
-        XTypeGroup(
-            label: 'Markdown 文件', extensions: ['md', 'markdown', 'txt']),
+        XTypeGroup(label: 'Markdown 文件', extensions: ['md', 'markdown', 'txt']),
         XTypeGroup(label: '所有文件'),
       ],
     );

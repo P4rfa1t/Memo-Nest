@@ -30,6 +30,7 @@ class _VaultPanelState extends State<VaultPanel> {
   final _focus = <FocusNode>[FocusNode(), FocusNode(), FocusNode()];
   String _message = '';
   bool _busy = false;
+
   /// 系统凭据能不能用（Windows Hello / Android 生物识别，已录入才算）。
   ///
   /// 这里**不看**托管记录在不在：第一次解锁时 `hello.bin` 还没有，
@@ -188,10 +189,9 @@ class _VaultPanelState extends State<VaultPanel> {
                           size: 16, color: Palette.fg),
                       const SizedBox(width: 6),
                       Text(
-                        _busy
-                            ? '等待验证…'
-                            : '用 ${state.host.authLabel} 解锁',
-                        style: const TextStyle(fontSize: 12.5, color: Palette.fg),
+                        _busy ? '等待验证…' : '用 ${state.host.authLabel} 解锁',
+                        style:
+                            const TextStyle(fontSize: 12.5, color: Palette.fg),
                       ),
                     ],
                   ),
